@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <zlib.h>
+#include <linux/types.h>
 #include "Assembly.h"
 #include "Process_Read.h"
 #include "CommandLines.h"
