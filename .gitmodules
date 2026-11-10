@@ -1,0 +1,3 @@
+[submodule "poa-consensus"]
+	path = poa-consensus
+	url = https://github.com/Psy-Fer/poa-consensus
