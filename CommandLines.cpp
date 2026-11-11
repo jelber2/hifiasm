@@ -85,6 +85,9 @@ static ko_longopt_t long_options[] = {
     { "poa-flank",    ko_required_argument, 367},
     { "poa-min-reads", ko_required_argument, 368},
     { "poa-max-period", ko_required_argument, 369},
+    { "poa-max-candidate-bases", ko_required_argument, 370},
+    { "poa-seed-step", ko_required_argument, 371},
+    { "poa-edge-len", ko_required_argument, 372},
     // { "path-round",     ko_required_argument, 348},
 	{ 0, 0, 0 }
 };
@@ -236,6 +239,15 @@ void Print_H(hifiasm_opt_t* asm_opt)
     fprintf(stderr, "                      minimum spanning reads to polish a locus [%d]\n", asm_opt->poa_min_reads);
     fprintf(stderr, "    --poa-max-period INT\n");
     fprintf(stderr, "                      longest repeat unit considered [%d]\n", asm_opt->poa_max_period);
+    fprintf(stderr, "    --poa-max-candidate-bases INT\n");
+    fprintf(stderr, "                      cap on recruited read bases held in memory; 0 = unlimited [%lld]\n",
+                                      asm_opt->poa_max_cand_bases);
+    fprintf(stderr, "    --poa-seed-step  INT\n");
+    fprintf(stderr, "                      check every Nth read k-mer when recruiting reads [%d]\n",
+                                      asm_opt->poa_seed_step);
+    fprintf(stderr, "    --poa-edge-len   INT\n");
+    fprintf(stderr, "                      flank edge length used for seeding, 20-120 [%d]\n",
+                                      asm_opt->poa_edge_len);
 
     fprintf(stderr, "  ONT simplex assembly (beta):\n");
     fprintf(stderr, "    --ont        assemble ONT simplex reads in fastq format\n");
@@ -384,6 +396,9 @@ void init_opt(hifiasm_opt_t* asm_opt)
     asm_opt->poa_flank_len = 120;
     asm_opt->poa_min_reads = 6;
     asm_opt->poa_max_period = 200;
+    asm_opt->poa_max_cand_bases = 4000000000LL;
+    asm_opt->poa_seed_step = 2;
+    asm_opt->poa_edge_len = 60;
     asm_opt->is_sc = 0;
     asm_opt->chemical_cov = 1;
     asm_opt->chemical_flank = 256;
@@ -1029,6 +1044,12 @@ int CommandLine_process(int argc, char *argv[], hifiasm_opt_t* asm_opt)
             asm_opt->poa_min_reads = atol(opt.arg);
         } else if (c == 369) {
             asm_opt->poa_max_period = atol(opt.arg);
+        } else if (c == 370) {
+            asm_opt->poa_max_cand_bases = atoll(opt.arg);
+        } else if (c == 371) {
+            asm_opt->poa_seed_step = atol(opt.arg);
+        } else if (c == 372) {
+            asm_opt->poa_edge_len = atol(opt.arg);
         } else if (c == 'l') {   ///0: disable purge_dup; 1: purge containment; 2: purge overlap
             asm_opt->purge_level_primary = asm_opt->purge_level_trio = atoi(opt.arg);
         }

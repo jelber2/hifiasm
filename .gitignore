@@ -1,3 +1,5 @@
 .*.swp
 *.o
 *.json
+/poa-ffi/target/*
+hifiasm

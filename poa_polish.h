@@ -11,10 +11,12 @@ extern "C" {
  * Post-assembly tandem-repeat polishing.
  *
  * Runs after the contig graph has been written. For every tandem repeat longer
- * than a couple of copies, the reads that were assembled into the contig are
- * recovered from the GFA `A` lines, cut down to [repeat + both flanks], and fed
- * to poa-consensus' single-allele flanked mode. The resulting repeat is spliced
- * back between the same flank anchors when it is better supported by the reads.
+ * than a couple of copies, the reads that span the locus plus both flanks are
+ * recovered by streaming the input once against a seed index built from the
+ * locus flanks (the read set itself is never held in memory), cut down to
+ * [repeat + both flanks], and fed to poa-consensus' single-allele flanked mode.
+ * The resulting repeat is spliced back between the same flank anchors when it
+ * is better supported by the reads.
  *
  * Writes <prefix>.poa.gfa / .poa.fa next to the assembly and a .poa.tsv report.
  * Returns 0 on success, non-zero if no assembly could be polished.

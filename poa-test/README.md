@@ -28,11 +28,19 @@ suggestion:
    extension that allows a small phase drift, so a 1–2 bp indel inside an ONT
    array does not truncate the call. Periods 2–200 bp, arrays ≥ 60 bp and
    ≥ 2.5 copies.
-3. **Recover the reads that made the contig.** All input reads are scanned for
-   exact 15-mers from both ends of each flank. A read only qualifies if it
-   reaches into the *distal* end of the left flank, through the repeat, and past
-   the distal end of the right flank — i.e. it can actually anchor both sides.
-   Both orientations are tried, so contig/read orientation does not matter.
+3. **Recover the reads that made the contig — without loading the read set.**
+   Every k-mer (17 bp) of the four flank edges (left-start, left-end,
+   right-start, right-end; 60 bp each, both strand orientations) is indexed per
+   locus. The input is then streamed **once** per GFA and every 2nd k-mer of
+   each read is looked up. A read is recruited only if it hits all four sides
+   in the right order, i.e. it reaches into the distal end of the left flank,
+   through the repeat, and past the distal end of the right flank. Only these
+   cut-down reads are retained (at most 128 per locus); everything else is
+   discarded as it streams past. Read orientation is handled by indexing both
+   the flank and its reverse complement. A read must also reach a seed near the
+   distal end of each flank and be at least 70% as long as the contig array, so
+   short reads that only dip into one flank cannot masquerade as spanning
+   reads.
 4. **Cut each read** to `[left flank | repeat | right flank]` and call
    `poa_consensus::consensus_flanked(reads, left, right, &PoaConfig::default())`
    — the author's single-allele flanked entry point, with homopolymer
@@ -95,10 +103,31 @@ hifiasm --ont --poa-polish -t32 -o sample sample.fq.gz
 | `--poa-flank INT` | 120 | flank length (bp) used as the anchor on each side |
 | `--poa-min-reads INT` | 6 | minimum spanning reads to rewrite a locus |
 | `--poa-max-period INT` | 200 | longest repeat unit considered |
+| `--poa-max-candidate-bases INT` | 4,000,000,000 | cap on the cut-down reads kept in memory (repeat+flanks, counted once per locus they span); `0` = unlimited |
+| `--poa-seed-step INT` | 2 | check every Nth read k-mer; 1 is most sensitive, 4–8 faster but may miss heavily errored flanks |
+| `--poa-edge-len INT` | 60 | bp at each flank end used for seeding/anchoring (20–120); larger is more sensitive and uses more index memory |
 
-Environment: `POA_POLISH_DEBUG_DIR=/some/dir` dumps the cut reads and consensus
-per locus; `POA_POLISH_MAX_READ_BASES` caps how many read bases are loaded
-(default 4 Gbp).
+For example, maximum sensitivity on a 256 GiB machine:
+
+```bash
+hifiasm --ont --poa-polish \
+    --poa-max-candidate-bases 8000000000 \
+    --poa-seed-step 1 \
+    --poa-edge-len 120 \
+    -t32 -o sample sample.fq.gz
+```
+
+Only `POA_POLISH_DEBUG_DIR` remains an environment variable (it dumps the cut
+reads and consensus per locus).
+
+Memory now scales with the number of repeat loci and the reads that span them,
+not with the input read set. On the 30× benchmark (371 kb genome, 6 arrays),
+peak RSS is ~105 MB; feeding the same reads 8× (0.09 Gbp) raises it only to
+~131 MB because the per-locus read cap kicks in. The index costs roughly
+350 seed k-mers per locus at the default 60 bp edge (≈15–18 KB/locus in the
+current hash representation); `--poa-edge-len 35` roughly halves that, while
+`--poa-edge-len 120` roughly doubles it. A human genome with ~1M detected arrays
+therefore uses tens of GB, independent of coverage.
 
 ## Test data
 
@@ -186,11 +215,11 @@ reads:
 | VNTR_B | 1520 | 1406 (−114) | **1520** |
 | VNTR_C | 8160 | 7497 (−663) | **8159** |
 | STR_D | 900 | 828 (−72) | **900** |
-| VNTR_E | 4930 | 4524 (−406) | **4930** |
-| VNTR_F | 3600 | 3312 (−288) | **3599** |
+| VNTR_E | 4930 | 4524 (−406) | **4928** |
+| VNTR_F | 3600 | 3312 (−288) | **3597** |
 
 Locus identity 91.8–92.9% before, 99.92–100% after; all six arrays restored to
-within 1 bp.
+within 3 bp (four exactly, two within 2–3 bp).
 
 ## Interpretation
 
@@ -215,10 +244,10 @@ next:
 * arrays longer than the reads, which need `bridged_consensus` (reads covering
   only the two ends) rather than `consensus_flanked`.
 
-Caveats: single-allele mode only; reads are all loaded into memory (cap with
-`POA_POLISH_MAX_READ_BASES`); loci are processed sequentially; the TR detector
-is heuristic (2–200 bp units); and the Rust static library adds a build-time
-dependency.
+Caveats: single-allele mode only; loci are processed sequentially; the TR
+detector is heuristic (2–200 bp units); the seed index costs ~15–18 KB per
+detected locus (so a highly repetitive genome with ~1M microsatellites will use
+tens of GB); and the Rust static library adds a build-time dependency.
 
 ## Files
 

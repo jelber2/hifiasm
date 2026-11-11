@@ -78,6 +78,9 @@ typedef struct {
     int poa_flank_len;
     int poa_min_reads;
     int poa_max_period;
+    long long poa_max_cand_bases;
+    int poa_seed_step;
+    int poa_edge_len;
     int number_of_round;
     int number_of_pround;
     int adapterLen;

@@ -146,7 +146,8 @@ hifiasm -t64 --ont --poa-polish -o ONT.asm ONT.read.fastq.gz
 
 The original GFA is left untouched. This needs a Rust toolchain (cargo/rustc
 1.85+) at build time; see `poa-test/README.md` for options, benchmarks and
-limitations (`--poa-flank`, `--poa-min-reads`, `--poa-max-period`).
+limitations (`--poa-flank`, `--poa-min-reads`, `--poa-max-period`,
+`--poa-max-candidate-bases`, `--poa-seed-step`, `--poa-edge-len`).
 
 
 ### <a name="hic"></a>Hi-C integration

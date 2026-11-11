@@ -6,24 +6,31 @@
  *   1. After the contig graph is written, walk every contig in the GFA.
  *   2. Find tandem-repeat / VNTR loci from the contig sequence itself
  *      (period 2..max_period, >= ~2.5 copies).
- *   3. Recover the reads that were assembled into that contig from the GFA
- *      `A` lines; keep the ones that contain both flanking regions (located by
- *      exact k-mer hits, so read orientation does not matter).
- *   4. Cut each read down to [left flank | repeat | right flank] and ask
- *      poa-consensus' single-allele flanked mode for a fresh repeat consensus.
+ *   3. Recover the reads that span each locus plus BOTH flanks. This is done in
+ *      a single streaming pass over the input reads using a minimizer index
+ *      built from the locus flanks only -- the read set is never held in
+ *      memory, only the (small) set of reads that actually span a repeat.
+ *   4. Cut each recruited read down to [left flank | repeat | right flank] and
+ *      ask poa-consensus' single-allele flanked mode for a fresh repeat
+ *      consensus.
  *   5. If the new repeat is better supported by the reads, splice it back
  *      between the same flank anchors.
  *
- * The original GFA is never modified: patched assemblies are written to
- * <prefix>.poa.gfa / <prefix>.poa.fa, together with a .poa.tsv report.
+ * Memory therefore scales with the number of repeat loci and the reads that
+ * span them, not with the size of the input read set. The original GFA is
+ * never modified: patched assemblies are written to <prefix>.poa.gfa /
+ * <prefix>.poa.fa, together with a .poa.tsv report.
  */
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -40,8 +47,14 @@ KSEQ_INIT(gzFile, gzread)
 
 namespace {
 
-const int TR_KMER = 11;          // k for period detection in the contig
-const int HIT_KMER = 15;         // k for locating flanks inside reads
+const int TR_KMER = 11;            // k for period detection in the contig
+const int RECRUIT_K = 17;          // seed k-mer for read recruitment
+/* Check every Nth k-mer of a read. 2 keeps ~10 seeds per flank edge and
+ * recovers nearly all spanning reads; raise it with --poa-seed-step for speed
+ * at the cost of sensitivity. */
+int g_seed_step = 2;
+int g_edge_len = 60;               // bp at each flank end used for anchoring
+const int HIT_KMER = 15;           // k for the post-hoc k-mer support check
 const int MAX_READS_PER_LOCUS = 128;
 const double MIN_COPIES = 2.5;
 const int MIN_TR_LEN = 60;
@@ -52,17 +65,18 @@ struct TrRegion {
     int period;
 };
 
-struct ReadSet {
-    std::unordered_map<std::string, std::string> seq;
-    std::vector<std::string> order;   // deterministic scan order
-    size_t total_bases;
-};
-
-struct Segment {
-    std::string name, seq, tags;
-    std::vector<std::string> a_lines;
-    std::vector<std::string> read_names;
-    std::unordered_set<std::string> seen_reads;
+/**
+ * One repeat locus plus the reads recruited for it. Only these reads are held
+ * in memory; everything else is discarded as it streams past.
+ */
+struct Locus {
+    std::string contig;
+    long long start, end;
+    int period;
+    int flank;
+    std::string left, right;
+    std::vector<std::string> cut_reads;
+    std::vector<long long> spans;
 };
 
 struct LocusStat {
@@ -73,6 +87,11 @@ struct LocusStat {
     int n_reads;
     double cont_old, cont_new;
     std::string status;
+};
+
+struct Mini {
+    uint64_t kmer;
+    int pos;
 };
 
 /* ------------------------------------------------------------------------- */
@@ -140,12 +159,11 @@ void split_tabs(const std::string &s, std::vector<std::string> &out)
     }
 }
 
-/**
- * Tolerant periodicity test at position i for period p, allowing the local
- * phase to drift by a couple of bases. A 1-2 bp indel inside a long VNTR is
- * common in an ONT contig and otherwise terminates repeat extension early,
- * leaving the tail of the array undetected.
- */
+/* ------------------------------------------------------------------------- */
+/* tandem-repeat detection                                                    */
+/* ------------------------------------------------------------------------- */
+
+/** Tolerant periodicity test at position i for period p (phase may drift). */
 bool periodic_at(const std::string &s, long long i, int p, int &p_used)
 {
     long long L = (long long)s.size();
@@ -179,7 +197,7 @@ std::vector<TrRegion> detect_trs(const std::string &s, int max_period)
 
     const uint32_t mask = (uint32_t)(TBL - 1);
     uint32_t code = 0;
-    int run = 0;                    // consecutive valid bases
+    int run = 0;
     long long next_allowed = 0;
 
     for (long long i = 0; i < L; ++i) {
@@ -196,9 +214,8 @@ std::vector<TrRegion> detect_trs(const std::string &s, int max_period)
         int p = (int)(i - prev);
         if (p < 2 || p > max_period) continue;
 
-        /* Compare at least two full units. The window must therefore scale
-         * with p; a fixed 100 bp cap silently made every period > 50 bp
-         * undetectable. */
+        /* Compare at least two full units: the window must scale with p or
+         * every period > 50 bp becomes undetectable. */
         int W = std::min(2 * p + 50, 500);
         int m = 0, n = 0;
         for (int t = 0; t < W && i + t + p < L; ++t, ++n)
@@ -228,9 +245,9 @@ std::vector<TrRegion> detect_trs(const std::string &s, int max_period)
             next_allowed = e;
         }
     }
-    /* Collapse overlapping and near-adjacent calls: a 19 bp sub-period inside a
-     * 38 bp unit, or the same array re-detected a few bases later, must not be
-     * patched twice (the second splice would use stale coordinates). */
+
+    /* Collapse overlapping and near-adjacent calls (a sub-period inside a
+     * longer unit, or the same array re-detected). */
     std::sort(regions.begin(), regions.end(), [](const TrRegion &x, const TrRegion &y) {
         if (x.start != y.start) return x.start < y.start;
         return (x.end - x.start) > (y.end - y.start);
@@ -258,56 +275,300 @@ std::vector<TrRegion> detect_trs(const std::string &s, int max_period)
     return merged;
 }
 
+/* ------------------------------------------------------------------------- */
+/* minimizers + seed index                                                    */
+/* ------------------------------------------------------------------------- */
+
 /**
- * Locate a repeat inside a read, requiring the FULL flanks on both sides.
- *
- * `l_start` / `l_end` are k-mer sets from the first / last 35 bp of the left
- * flank; `r_start` / `r_end` likewise for the right flank. A read only counts
- * when it reaches into the distal end of both flanks, so reads that start
- * inside the repeat (and would not let poa-consensus anchor the flank) are
- * rejected. `repeat_span` is the read's own repeat length between the flank
- * cores, used to keep a homogeneous allele set.
+ * kmer -> list of (locus, strand, flank side). Strand is 0 for the contig
+ * orientation and 1 when the indexed k-mer is the reverse complement of the
+ * flank edge; side is 0..3 = left-start, left-end, right-start, right-end.
  */
-bool locate_flanks(const std::string &read, int K,
-                   const std::unordered_set<uint64_t> &l_start,
-                   const std::unordered_set<uint64_t> &l_end,
-                   const std::unordered_set<uint64_t> &r_start,
-                   const std::unordered_set<uint64_t> &r_end,
-                   long long min_span,
-                   long long &lpos, long long &rend, long long &repeat_span)
+struct SeedHit {
+    uint64_t packed;   // locus<<15 | strand<<14 | side<<12 | offset
+    uint32_t next;
+};
+
+struct SeedIndex {
+    std::unordered_map<uint64_t, uint32_t> head;
+    std::vector<SeedHit> hits;
+
+    void clear()
+    {
+        head.clear();
+        hits.clear();
+    }
+
+    void add(uint64_t kmer, uint64_t locus, int strand, int side, int offset)
+    {
+        uint32_t &h = head.emplace(kmer, UINT32_MAX).first->second;
+        uint32_t idx = (uint32_t)hits.size();
+        hits.push_back(SeedHit{(locus << 15) | ((uint64_t)strand << 14) |
+                               ((uint64_t)side << 12) | (uint64_t)offset, h});
+        h = idx;
+    }
+};
+
+std::string flank_edge(const Locus &l, int side)
+{
+    const int F = l.flank;
+    const int E = std::min(g_edge_len, F);
+    switch (side) {
+    case 0: return l.left.substr(0, E);
+    case 1: return l.left.substr(F - E, E);
+    case 2: return l.right.substr(0, E);
+    default: return l.right.substr(F - E, E);
+    }
+}
+
+/**
+ * Index every k-mer of the flank edges (not just their minimizers): the read
+ * side is sampled with minimizers, and a minimizer of the *read* is only
+ * guaranteed to be one of the flank's k-mers if the whole edge is indexed
+ * (minimizers are not closed under context extension).
+ */
+void build_index(const std::vector<Locus> &loci, SeedIndex &idx)
+{
+    idx.clear();
+    idx.head.reserve(loci.size() * 64 + 16);
+    idx.hits.reserve(loci.size() * 200 + 64);
+    for (size_t i = 0; i < loci.size(); ++i) {
+        for (int side = 0; side < 4; ++side) {
+            std::string edge = flank_edge(loci[i], side);
+            for (int strand = 0; strand < 2; ++strand) {
+                const std::string s = (strand == 0) ? edge : revcomp(edge);
+                std::unordered_set<uint64_t> seen;
+                for (int p = 0; p + RECRUIT_K <= (int)s.size(); ++p) {
+                    uint64_t code = 0;
+                    bool ok = true;
+                    for (int j = 0; j < RECRUIT_K; ++j) {
+                        int b = base_code(s[p + j]);
+                        if (b < 0) { ok = false; break; }
+                        code = (code << 2) | (uint64_t)b;
+                    }
+                    /* keep the first offset for a repeated k-mer within an edge */
+                    if (ok && seen.insert(code).second)
+                        idx.add(code, i, strand, side, p);
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* read recruitment (single streaming pass)                                   */
+/* ------------------------------------------------------------------------- */
+
+struct FoundHit {
+    uint32_t locus;
+    int pos;
+    int offset;
+    uint8_t strand;
+    uint8_t side;
+};
+
+struct RecruitStats {
+    long long reads;
+    long long bases;
+    long long stored_reads;
+    long long stored_bases;
+    bool capped;
+};
+
+/**
+ * Stream a read past the seed index and, if it spans a locus plus both flanks,
+ * store the cut-down sequence for that locus. Nothing else is retained.
+ */
+void recruit_read(const std::string &read,
+                  std::vector<Locus> &loci,
+                  const SeedIndex &idx,
+                  std::vector<FoundHit> &found,
+                  size_t cap_bases,
+                  RecruitStats &st,
+                  size_t &stored_bases,
+                  std::string &scratch)
 {
     const long long n = (long long)read.size();
-    if (n < K) return false;
-    const uint64_t mask = ((1ULL << (2 * K)) - 1);
+    found.clear();
+    const uint64_t mask = (1ULL << (2 * RECRUIT_K)) - 1;
     uint64_t code = 0;
     int run = 0;
-    long long ls = -1;           /* first distal-left hit */
-    long long le = -1;           /* end of proximal-left hit */
-    long long rs = -1;           /* start of proximal-right hit */
-    long long re = -1;           /* end of distal-right hit */
-
-    for (long long i = 0; i < n; ++i) {
-        int b = base_code(read[i]);
+    for (long long p = 0; p < n; ++p) {
+        int b = base_code(read[p]);
         if (b < 0) { code = 0; run = 0; continue; }
         code = ((code << 2) | (uint64_t)b) & mask;
         ++run;
-        if (run < K) continue;
-        long long pos = i - (K - 1);
-        if (l_start.count(code) && ls < 0) ls = pos;
-        if (l_end.count(code)) le = pos + K;
-        if (r_start.count(code) && rs < 0) rs = pos;
-        if (r_end.count(code)) re = pos + K;
+        if (run < RECRUIT_K) continue;
+        int start = (int)(p - RECRUIT_K + 1);
+        if (g_seed_step > 1 && (start % g_seed_step)) continue;
+        auto it = idx.head.find(code);
+        if (it == idx.head.end()) continue;
+        for (uint32_t h = it->second; h != UINT32_MAX; h = idx.hits[h].next) {
+            uint64_t q = idx.hits[h].packed;
+            FoundHit f;
+            f.locus = (uint32_t)(q >> 15);
+            f.strand = (uint8_t)((q >> 14) & 1);
+            f.side = (uint8_t)((q >> 12) & 3);
+            f.offset = (int)(q & 0xFFF);
+            f.pos = start;
+            found.push_back(f);
+        }
     }
-    if (ls < 0 || le < 0 || rs < 0 || re < 0) return false;
-    if (!(ls < le && le <= rs && rs < re)) return false;
-    repeat_span = rs - le;
-    if (repeat_span < min_span) return false;
-    lpos = ls;
-    rend = re;
-    return true;
+    if (found.empty()) return;
+
+    std::sort(found.begin(), found.end(), [](const FoundHit &a, const FoundHit &b) {
+        if (a.locus != b.locus) return a.locus < b.locus;
+        if (a.strand != b.strand) return a.strand < b.strand;
+        return a.pos < b.pos;
+    });
+
+    size_t i = 0;
+    while (i < found.size()) {
+        size_t j = i + 1;
+        while (j < found.size() && found[j].locus == found[i].locus &&
+               found[j].strand == found[i].strand)
+            ++j;
+
+        const int strand = found[i].strand;
+        const uint32_t lid = found[i].locus;
+        const Locus &loc = loci[lid];
+        const long long region_len = loc.end - loc.start;
+        const int E = std::min(g_edge_len, loc.flank);
+        std::vector<long long> ls_v, le_v, rs_v, re_v;
+        int l_start_min_off = INT_MAX;
+        int r_end_max_off = -1;
+        int n_l_end = 0, n_r_start = 0;
+
+        for (size_t t = i; t < j; ++t) {
+            int pos = found[t].pos;
+            int off = found[t].offset;
+            if (strand == 1) {
+                pos = (int)(n - pos - RECRUIT_K);
+                off = E - off - RECRUIT_K;
+            }
+            switch (found[t].side) {
+            case 0: // left flank start
+                ls_v.push_back(pos - off);
+                l_start_min_off = std::min(l_start_min_off, off);
+                break;
+            case 1: // left flank end == repeat start
+                le_v.push_back(pos + E - off);
+                ++n_l_end;
+                break;
+            case 2: // right flank start == repeat end
+                rs_v.push_back(pos - off);
+                ++n_r_start;
+                break;
+            default: // right flank end
+                re_v.push_back(pos + E - off);
+                r_end_max_off = std::max(r_end_max_off, off);
+                break;
+            }
+        }
+        i = j;
+
+        /* A read that truly spans the locus contains the distal end of each
+         * flank and at least one seed at each repeat boundary. The read-length
+         * floor rejects short reads that merely dip into one flank (they used
+         * to let a 4-5 kb read "span" an 8 kb array). */
+        if (ls_v.empty() || re_v.empty() || le_v.empty() || rs_v.empty()) continue;
+        if (n < (long long)(0.7 * region_len)) continue;
+        if (l_start_min_off > 20 || r_end_max_off < E - RECRUIT_K - 20) continue;
+        if (n_l_end < 1 || n_r_start < 1) continue;
+
+        auto median = [](std::vector<long long> &v) {
+            std::sort(v.begin(), v.end());
+            return v[v.size() / 2];
+        };
+        const long long ls = median(ls_v);
+        const long long le = median(le_v);
+        const long long rs = median(rs_v);
+        const long long re = median(re_v);
+        if (!(ls < le && le <= rs && rs < re)) continue;
+
+        /* Both flank boundaries must be fully inside the read. */
+        if (ls < 10 || re > n - 10) continue;
+
+        const long long span = rs - le;
+        if (span < (long long)(0.2 * region_len)) continue;
+        if (loc.cut_reads.size() >= (size_t)MAX_READS_PER_LOCUS) continue;
+
+        long long a = ls - 10;
+        long long b = re + 10;
+        if (b - a < span + 2 * (long long)loc.flank - 40) continue;
+        if (b - a < 100) continue;
+
+        if (stored_bases + (size_t)(b - a) > cap_bases) {
+            st.capped = true;
+            return;
+        }
+        if (strand == 0) {
+            loci[lid].cut_reads.push_back(read.substr(a, b - a));
+        } else {
+            scratch = revcomp(read);
+            loci[lid].cut_reads.push_back(scratch.substr(a, b - a));
+        }
+        loci[lid].spans.push_back(span);
+        stored_bases += (size_t)(b - a);
+        ++st.stored_reads;
+        st.stored_bases += (b - a);
+    }
 }
 
-/** Distinct k-mer set of a sequence (non-canonical, ACGT only). */
+RecruitStats stream_recruit(const hifiasm_opt_t *opt, std::vector<Locus> &loci,
+                            const SeedIndex &idx)
+{
+    RecruitStats st{0, 0, 0, 0, false};
+    size_t cap_bases = std::numeric_limits<size_t>::max();
+    if (opt->poa_max_cand_bases > 0)
+        cap_bases = (size_t)opt->poa_max_cand_bases;
+
+    std::string read, scratch;
+    std::vector<FoundHit> found;
+    size_t stored_bases = 0;
+    long long next_report = 1000000;
+
+    for (int f = 0; f < opt->num_reads && !st.capped; ++f) {
+        gzFile fp = gzopen(opt->read_file_names[f], "r");
+        if (!fp) {
+            fprintf(stderr, "[M::poa_polish] warning: cannot open %s\n",
+                    opt->read_file_names[f]);
+            continue;
+        }
+        kseq_t *ks = kseq_init(fp);
+        int l;
+        while ((l = kseq_read(ks)) >= 0) {
+            ++st.reads;
+            st.bases += l;
+            if (st.capped) break;
+            read.assign(ks->seq.s, ks->seq.l);
+            recruit_read(read, loci, idx, found, cap_bases, st,
+                         stored_bases, scratch);
+            if (st.reads >= next_report) {
+                fprintf(stderr,
+                        "[M::poa_polish] streamed %lld reads (%.2f Gbp), kept %lld "
+                        "spanning reads (%.2f Mbp)\n",
+                        st.reads, st.bases / 1e9, st.stored_reads,
+                        st.stored_bases / 1e6);
+                next_report += 1000000;
+            }
+        }
+        kseq_destroy(ks);
+        gzclose(fp);
+    }
+    if (st.capped) {
+        fprintf(stderr,
+                "[M::poa_polish] candidate read cap reached (%.2f Gbp); "
+                "raise --poa-max-candidate-bases to scan the remaining reads\n",
+                cap_bases / 1e9);
+    }
+    return st;
+}
+
+/* ------------------------------------------------------------------------- */
+/* k-mer support                                                              */
+/* ------------------------------------------------------------------------- */
+
 std::unordered_set<uint64_t> kmer_set(const std::string &s, int K)
 {
     std::unordered_set<uint64_t> out;
@@ -325,7 +586,6 @@ std::unordered_set<uint64_t> kmer_set(const std::string &s, int K)
     return out;
 }
 
-/** Fraction of `seq`'s distinct k-mers present in `kmers`; -1 if too short. */
 double containment(const std::string &seq, const std::unordered_set<uint64_t> &kmers, int K)
 {
     if ((long long)seq.size() < K) return -1.0;
@@ -338,169 +598,34 @@ double containment(const std::string &seq, const std::unordered_set<uint64_t> &k
 }
 
 /* ------------------------------------------------------------------------- */
-/* reads                                                                      */
-/* ------------------------------------------------------------------------- */
-
-ReadSet load_reads(const hifiasm_opt_t *opt)
-{
-    ReadSet rs;
-    rs.total_bases = 0;
-    long long limit = 4000000000LL;
-    if (const char *e = getenv("POA_POLISH_MAX_READ_BASES")) limit = atoll(e);
-
-    for (int f = 0; f < opt->num_reads; ++f) {
-        gzFile fp = gzopen(opt->read_file_names[f], "r");
-        if (!fp) {
-            fprintf(stderr, "[M::poa_polish] warning: cannot open %s\n", opt->read_file_names[f]);
-            continue;
-        }
-        kseq_t *ks = kseq_init(fp);
-        int l;
-        while ((l = kseq_read(ks)) >= 0) {
-            if (rs.total_bases > (size_t)limit) {
-                fprintf(stderr,
-                        "[M::poa_polish] read set exceeds %lld bases; raise "
-                        "POA_POLISH_MAX_READ_BASES or disable --poa-polish\n", limit);
-                kseq_destroy(ks);
-                gzclose(fp);
-                rs.seq.clear();
-                rs.order.clear();
-                return rs;
-            }
-            std::string nm(ks->name.s);
-            if (rs.seq.emplace(nm, std::string(ks->seq.s, ks->seq.l)).second)
-                rs.order.push_back(nm);
-            rs.total_bases += ks->seq.l;
-        }
-        kseq_destroy(ks);
-        gzclose(fp);
-    }
-    fprintf(stderr, "[M::poa_polish] loaded %zu reads (%.2f Mbp)\n",
-            rs.seq.size(), rs.total_bases / 1e6);
-    return rs;
-}
-
-/* ------------------------------------------------------------------------- */
 /* one locus                                                                  */
 /* ------------------------------------------------------------------------- */
 
-struct CutRead {
-    std::string seq;
-};
-
-bool locate_in_either_orientation(const std::string &read, int K,
-                                  const std::unordered_set<uint64_t> &l_start,
-                                  const std::unordered_set<uint64_t> &l_end,
-                                  const std::unordered_set<uint64_t> &r_start,
-                                  const std::unordered_set<uint64_t> &r_end,
-                                  long long min_span,
-                                  std::string &out,
-                                  long long &lpos, long long &rend,
-                                  long long &repeat_span)
-{
-    if (locate_flanks(read, K, l_start, l_end, r_start, r_end, min_span,
-                      lpos, rend, repeat_span)) {
-        out = read;
-        return true;
-    }
-    std::string rc = revcomp(read);
-    if (locate_flanks(rc, K, l_start, l_end, r_start, r_end, min_span,
-                      lpos, rend, repeat_span)) {
-        out.swap(rc);
-        return true;
-    }
-    return false;
-}
-
 /**
- * Try to polish one repeat. Returns true when `seq` was modified.
+ * Try to polish one repeat using the reads already recruited for it.
+ * Returns true when `seq` was modified.
  */
 bool polish_locus(std::string &seq,
                   const TrRegion &tr,
-                  const std::vector<std::string> &contig_reads,
-                  const ReadSet &reads,
+                  const Locus &loc,
                   const hifiasm_opt_t *opt,
                   LocusStat &stat)
 {
-    const long long L = (long long)seq.size();
-    int flank = opt->poa_flank_len > 0 ? opt->poa_flank_len : 120;
-    if (flank < 40) flank = 40;
-    flank = (int)std::min<long long>(flank, std::min<long long>(tr.start, L - tr.end));
-    if (flank < 40) {
-        stat.status = "skip:flank_too_short";
-        return false;
-    }
-
-    const std::string left = seq.substr(tr.start - flank, flank);
-    const std::string right = seq.substr(tr.end, flank);
-
-    const int edge = std::min(35, flank);
-    std::unordered_set<uint64_t> l_start = kmer_set(left.substr(0, edge), HIT_KMER);
-    std::unordered_set<uint64_t> l_end = kmer_set(left.substr(flank - edge, edge), HIT_KMER);
-    std::unordered_set<uint64_t> r_start = kmer_set(right.substr(0, edge), HIT_KMER);
-    std::unordered_set<uint64_t> r_end = kmer_set(right.substr(flank - edge, edge), HIT_KMER);
-    if (l_start.size() < 5 || l_end.size() < 5 ||
-        r_start.size() < 5 || r_end.size() < 5) {
-        stat.status = "skip:low_complexity_flank";
-        return false;
-    }
-
+    const int flank = loc.flank;
     const long long region_len = tr.end - tr.start;
-    const long long min_span = (long long)(region_len * 0.5);
-    const int pad = 10;
+    stat.n_reads = (int)loc.cut_reads.size();
 
-    std::vector<std::string> cut_reads;
-    std::vector<long long> spans;
-    cut_reads.reserve(std::min<size_t>(reads.order.size(), MAX_READS_PER_LOCUS));
-
-    /* Prefer the reads listed in the GFA `A` lines (they are literally the ones
-     * the assembler used at this contig), then scan the remaining input reads.
-     * In hifiasm's ONT mode the A-line set is only a thin tiling, so the full
-     * scan is what actually supplies depth. */
-    std::unordered_set<std::string> seen;
-    auto try_read = [&](const std::string &rn) {
-        if (cut_reads.size() >= (size_t)MAX_READS_PER_LOCUS) return;
-        if (!seen.insert(rn).second) return;
-        auto it = reads.seq.find(rn);
-        if (it == reads.seq.end()) return;
-        std::string oriented;
-        long long lpos = 0, rend = 0, span = 0;
-        if (!locate_in_either_orientation(it->second, HIT_KMER,
-                                          l_start, l_end, r_start, r_end,
-                                          min_span, oriented, lpos, rend, span))
-            return;
-        long long a = std::max<long long>(0, lpos - pad);
-        long long b = std::min<long long>((long long)oriented.size(), rend + pad);
-        if (b - a < region_len * 0.6) return;
-        cut_reads.push_back(oriented.substr(a, b - a));
-        spans.push_back(span);
-    };
-    for (const std::string &rn : contig_reads) try_read(rn);
-    for (const std::string &rn : reads.order) try_read(rn);
-
-    /* Keep one allele's worth of reads: if the read set is a mixture (diploid
-     * locus), cluster around the median repeat length instead of blending two
-     * arrays into a longer mosaic. */
-    if (spans.size() >= 3) {
-        std::vector<long long> sorted = spans;
-        std::sort(sorted.begin(), sorted.end());
-        long long med = sorted[sorted.size() / 2];
-        std::vector<std::string> keep_r;
-        std::vector<long long> keep_s;
-        for (size_t i = 0; i < cut_reads.size(); ++i) {
-            if (spans[i] * 10 >= med * 7 && spans[i] * 10 <= med * 14) {
-                keep_r.push_back(cut_reads[i]);
-                keep_s.push_back(spans[i]);
-            }
-        }
-        cut_reads.swap(keep_r);
-        spans.swap(keep_s);
+    const int min_reads = std::max(3, opt->poa_min_reads);
+    if ((int)loc.cut_reads.size() < min_reads) {
+        stat.status = "skip:insufficient_reads";
+        return false;
     }
 
-    stat.n_reads = (int)cut_reads.size();
+    /* Median read-array length + tolerance, used to avoid chasing consensus
+     * noise on an already-correct array. */
     long long span_med = region_len, span_tol = 40;
-    if (!spans.empty()) {
-        std::vector<long long> sorted = spans;
+    if (!loc.spans.empty()) {
+        std::vector<long long> sorted = loc.spans;
         std::sort(sorted.begin(), sorted.end());
         span_med = sorted[sorted.size() / 2];
         std::vector<long long> dev;
@@ -510,14 +635,9 @@ bool polish_locus(std::string &seq,
         long long mad = dev[dev.size() / 2];
         span_tol = std::max<long long>(40, std::max(3 * mad, (long long)(0.02 * span_med)));
     }
-    const int min_reads = std::max(3, opt->poa_min_reads);
-    if ((int)cut_reads.size() < min_reads) {
-        stat.status = "skip:insufficient_reads";
-        return false;
-    }
 
     std::unordered_set<uint64_t> read_kmers;
-    for (const std::string &r : cut_reads) {
+    for (const std::string &r : loc.cut_reads) {
         std::unordered_set<uint64_t> s = kmer_set(r, HIT_KMER);
         read_kmers.insert(s.begin(), s.end());
     }
@@ -526,9 +646,9 @@ bool polish_locus(std::string &seq,
 
     std::vector<const char *> ptrs;
     std::vector<size_t> lens;
-    ptrs.reserve(cut_reads.size());
-    lens.reserve(cut_reads.size());
-    for (const std::string &r : cut_reads) {
+    ptrs.reserve(loc.cut_reads.size());
+    lens.reserve(loc.cut_reads.size());
+    for (const std::string &r : loc.cut_reads) {
         ptrs.push_back(r.data());
         lens.push_back(r.size());
     }
@@ -540,8 +660,8 @@ bool polish_locus(std::string &seq,
                  stat.contig.c_str(), tr.start, tr.end);
         FILE *fp = fopen(fn, "w");
         if (fp) {
-            for (size_t i = 0; i < cut_reads.size(); ++i)
-                fprintf(fp, ">r%zu\n%s\n", i, cut_reads[i].c_str());
+            for (size_t i = 0; i < loc.cut_reads.size(); ++i)
+                fprintf(fp, ">r%zu\n%s\n", i, loc.cut_reads[i].c_str());
             fclose(fp);
         }
     }
@@ -553,8 +673,8 @@ bool polish_locus(std::string &seq,
     o.max_read_len = 0;
 
     PoaResult *res = poa_consensus_flanked_c(ptrs.data(), lens.data(), ptrs.size(),
-                                             left.data(), left.size(),
-                                             right.data(), right.size(), &o);
+                                             loc.left.data(), loc.left.size(),
+                                             loc.right.data(), loc.right.size(), &o);
     if (!res || res->status != POA_OK || !res->repeat) {
         stat.status = (res && res->error) ? (std::string("skip:") + res->error)
                                           : std::string("skip:poa_error");
@@ -575,6 +695,7 @@ bool polish_locus(std::string &seq,
             fclose(fp);
         }
     }
+
     /* Both flanks must actually be locatable in the full consensus: if the
      * crate could not anchor, it returns the whole (flank-carrying) sequence
      * instead of a slice, and splicing that would duplicate or delete sequence
@@ -584,8 +705,8 @@ bool polish_locus(std::string &seq,
         std::string whole(res->whole, res->whole_len);
         for (int probe : {20, 16, 12}) {
             if (probe > flank) continue;
-            size_t pl = whole.find(left.substr(flank - probe, probe));
-            size_t pr = whole.find(right.substr(0, probe));
+            size_t pl = whole.find(loc.left.substr(flank - probe, probe));
+            size_t pr = whole.find(loc.right.substr(0, probe));
             if (pl != std::string::npos && pr != std::string::npos && pr > pl) {
                 anchored = true;
                 break;
@@ -610,6 +731,7 @@ bool polish_locus(std::string &seq,
         stat.status = "skip:lower_support";
         return false;
     }
+
     const long long delta = (long long)new_repeat.size() - region_len;
     if (new_repeat == old_repeat ||
         (std::llabs(delta) <= 2 && stat.cont_new <= stat.cont_old + 0.005)) {
@@ -617,9 +739,6 @@ bool polish_locus(std::string &seq,
         return false;
     }
 
-    /* Do not chase consensus noise: only rewrite when the current array length
-     * is inconsistent with the length distribution of the reads that span it
-     * (a real copy-number error), and the new length is closer to that median. */
     long long old_err = std::llabs(region_len - span_med);
     long long new_err = std::llabs((long long)new_repeat.size() - span_med);
     if (old_err <= span_tol || new_err >= old_err) {
@@ -635,8 +754,72 @@ bool polish_locus(std::string &seq,
 }
 
 /* ------------------------------------------------------------------------- */
-/* GFA walking                                                                */
+/* GFA: pass 1 (detect loci), read streaming, pass 2 (patch/write)            */
 /* ------------------------------------------------------------------------- */
+
+int locus_flank(long long L, const TrRegion &tr, const hifiasm_opt_t *opt)
+{
+    int flank = opt->poa_flank_len > 0 ? opt->poa_flank_len : 120;
+    if (flank < 40) flank = 40;
+    flank = (int)std::min<long long>(flank, std::min<long long>(tr.start, L - tr.end));
+    return flank;
+}
+
+/** Parse the first three fields of an S line and keep the tag remainder. */
+bool parse_s_line(const std::string &line, std::string &name, std::string &seq,
+                  std::string &tags)
+{
+    size_t t1 = line.find('\t');
+    size_t t2 = (t1 == std::string::npos) ? std::string::npos : line.find('\t', t1 + 1);
+    if (t2 == std::string::npos) return false;
+    size_t t3 = line.find('\t', t2 + 1);
+    name = line.substr(t1 + 1, t2 - t1 - 1);
+    if (t3 == std::string::npos) {
+        seq = line.substr(t2 + 1);
+        tags.clear();
+    } else {
+        seq = line.substr(t2 + 1, t3 - t2 - 1);
+        tags = line.substr(t3 + 1);
+    }
+    return true;
+}
+
+/** Pass 1: collect repeat loci (contig coordinates + flanks) from a GFA. */
+std::vector<Locus> collect_loci(const std::string &gfa_name, const hifiasm_opt_t *opt)
+{
+    std::vector<Locus> loci;
+    FILE *in = fopen(gfa_name.c_str(), "r");
+    if (!in) return loci;
+
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t len;
+    std::string name, seq, tags;
+    while ((len = getline(&line, &cap, in)) > 0) {
+        if (len && line[len - 1] == '\n') line[--len] = 0;
+        if (len < 3 || line[0] != 'S' || line[1] != '\t') continue;
+        if (!parse_s_line(std::string(line, len), name, seq, tags)) continue;
+        if (seq == "*" || seq.size() < (size_t)MIN_TR_LEN) continue;
+
+        std::vector<TrRegion> trs = detect_trs(seq, opt->poa_max_period);
+        for (const TrRegion &tr : trs) {
+            int flank = locus_flank((long long)seq.size(), tr, opt);
+            if (flank < 40) continue;
+            Locus loc;
+            loc.contig = name;
+            loc.start = tr.start;
+            loc.end = tr.end;
+            loc.period = tr.period;
+            loc.flank = flank;
+            loc.left = seq.substr(tr.start - flank, flank);
+            loc.right = seq.substr(tr.end, flank);
+            loci.push_back(std::move(loc));
+        }
+    }
+    free(line);
+    fclose(in);
+    return loci;
+}
 
 std::string make_out_name(const std::string &gfa, const char *ext)
 {
@@ -644,13 +827,38 @@ std::string make_out_name(const std::string &gfa, const char *ext)
 }
 
 bool polish_one_gfa(const std::string &gfa_name,
-                    const ReadSet &reads,
                     const hifiasm_opt_t *opt,
                     FILE *tsv,
                     int &n_loci,
                     int &n_patched,
                     long long &bases_added)
 {
+    /* ---- pass 1: find loci and their flanks ---------------------------- */
+    std::vector<Locus> loci = collect_loci(gfa_name, opt);
+    if (loci.empty()) {
+        fprintf(stderr, "[M::poa_polish] %s: no tandem repeats found\n", gfa_name.c_str());
+    }
+
+    /* ---- one streaming pass over the reads ------------------------------ */
+    RecruitStats st{0, 0, 0, 0, false};
+    if (!loci.empty()) {
+        SeedIndex idx;
+        build_index(loci, idx);
+        fprintf(stderr,
+                "[M::poa_polish] %s: %zu loci indexed (%zu seed k-mers); "
+                "streaming reads...\n",
+                gfa_name.c_str(), loci.size(), idx.head.size());
+        st = stream_recruit(opt, loci, idx);
+        size_t kept = 0;
+        for (const Locus &l : loci) kept += l.cut_reads.size();
+        fprintf(stderr,
+                "[M::poa_polish] %s: streamed %lld reads (%.2f Gbp), kept %zu reads "
+                "spanning %zu loci (%.2f Mbp)\n",
+                gfa_name.c_str(), st.reads, st.bases / 1e9, kept, loci.size(),
+                st.stored_bases / 1e6);
+    }
+
+    /* ---- pass 2: patch and write --------------------------------------- */
     FILE *in = fopen(gfa_name.c_str(), "r");
     if (!in) return false;
 
@@ -669,10 +877,14 @@ bool polish_one_gfa(const std::string &gfa_name,
     char *line = NULL;
     size_t cap = 0;
     ssize_t len;
-    Segment cur;
-    bool have_seg = false;
-    int n_seg = 0, n_seg_patched = 0;
+    std::string name, seq, tags;
+    std::vector<std::string> a_lines;
     std::vector<std::string> tk;
+    size_t next_locus = 0;
+    int n_seg = 0, n_seg_patched = 0;
+    bool have_seg = false;
+    std::vector<TrRegion> cur_trs;
+    std::vector<int> cur_ids;
 
     auto flush_segment = [&]() {
         if (!have_seg) return;
@@ -680,46 +892,45 @@ bool polish_one_gfa(const std::string &gfa_name,
         bool patched = false;
         std::vector<std::pair<long long, long long>> shifts; // (region end, delta)
 
-        if (cur.seq != "*" && cur.seq.size() >= (size_t)MIN_TR_LEN && !reads.order.empty()) {
-            std::vector<TrRegion> trs = detect_trs(cur.seq, opt->poa_max_period);
-            /* right-to-left keeps earlier coordinates valid */
-            for (int k = (int)trs.size() - 1; k >= 0; --k) {
-                LocusStat st;
-                st.contig = cur.name;
-                st.start = trs[k].start;
-                st.end = trs[k].end;
-                st.period = trs[k].period;
-                st.old_len = st.new_len = trs[k].end - trs[k].start;
-                st.n_reads = 0;
-                st.cont_old = st.cont_new = -1.0;
-                ++n_loci;
-                if (polish_locus(cur.seq, trs[k], cur.read_names, reads, opt, st)) {
-                    patched = true;
-                    ++n_patched;
-                    bases_added += st.new_len - st.old_len;
-                    shifts.push_back({trs[k].end, st.new_len - st.old_len});
-                }
-                fprintf(stderr,
-                        "[M::poa_polish] %s %lld-%lld period=%d copies=%.1f reads=%d "
-                        "support=%.3f->%.3f %s\n",
-                        st.contig.c_str(), st.start, st.end, st.period,
-                        (double)(trs[k].end - trs[k].start) / trs[k].period,
-                        st.n_reads, st.cont_old, st.cont_new, st.status.c_str());
-                if (tsv)
-                    fprintf(tsv,
-                            "%s\t%s\t%lld\t%lld\t%d\t%.2f\t%lld\t%lld\t%d\t%.4f\t%.4f\t%s\n",
-                            gfa_name.c_str(), st.contig.c_str(), st.start, st.end,
-                            st.period,
-                            (double)(trs[k].end - trs[k].start) / trs[k].period,
-                            st.old_len, st.new_len, st.n_reads,
-                            st.cont_old, st.cont_new, st.status.c_str());
+        /* right-to-left keeps earlier coordinates valid */
+        for (int k = (int)cur_trs.size() - 1; k >= 0; --k) {
+            if (cur_ids[k] < 0) continue;
+            const Locus &loc = loci[cur_ids[k]];
+            LocusStat stt;
+            stt.contig = name;
+            stt.start = cur_trs[k].start;
+            stt.end = cur_trs[k].end;
+            stt.period = cur_trs[k].period;
+            stt.old_len = stt.new_len = cur_trs[k].end - cur_trs[k].start;
+            stt.n_reads = 0;
+            stt.cont_old = stt.cont_new = -1.0;
+            ++n_loci;
+            if (polish_locus(seq, cur_trs[k], loc, opt, stt)) {
+                patched = true;
+                ++n_patched;
+                bases_added += stt.new_len - stt.old_len;
+                shifts.push_back({cur_trs[k].end, stt.new_len - stt.old_len});
             }
-            if (patched) ++n_seg_patched;
+            fprintf(stderr,
+                    "[M::poa_polish] %s %lld-%lld period=%d copies=%.1f reads=%d "
+                    "support=%.3f->%.3f %s\n",
+                    stt.contig.c_str(), stt.start, stt.end, stt.period,
+                    (double)(cur_trs[k].end - cur_trs[k].start) / cur_trs[k].period,
+                    stt.n_reads, stt.cont_old, stt.cont_new, stt.status.c_str());
+            if (tsv)
+                fprintf(tsv,
+                        "%s\t%s\t%lld\t%lld\t%d\t%.2f\t%lld\t%lld\t%d\t%.4f\t%.4f\t%s\n",
+                        gfa_name.c_str(), stt.contig.c_str(), stt.start, stt.end,
+                        stt.period,
+                        (double)(cur_trs[k].end - cur_trs[k].start) / cur_trs[k].period,
+                        stt.old_len, stt.new_len, stt.n_reads,
+                        stt.cont_old, stt.cont_new, stt.status.c_str());
         }
+        if (patched) ++n_seg_patched;
 
         /* S line: update LN:i: but preserve every other tag */
-        fprintf(out, "S\t%s\t%s", cur.name.c_str(), cur.seq.c_str());
-        split_tabs(cur.tags, tk);
+        fprintf(out, "S\t%s\t%s", name.c_str(), seq.c_str());
+        split_tabs(tags, tk);
         std::string rebuilt;
         bool had_ln = false;
         for (const std::string &t : tk) {
@@ -728,19 +939,17 @@ bool polish_one_gfa(const std::string &gfa_name,
             if (!rebuilt.empty()) rebuilt += '\t';
             rebuilt += t;
         }
-        if (!had_ln && cur.seq != "*") {
+        if (!had_ln && seq != "*") {
             char buf[64];
-            snprintf(buf, sizeof(buf), "LN:i:%lld", (long long)cur.seq.size());
+            snprintf(buf, sizeof(buf), "LN:i:%lld", (long long)seq.size());
             if (!rebuilt.empty()) rebuilt += '\t';
             rebuilt += buf;
         }
         if (!rebuilt.empty()) fprintf(out, "\t%s", rebuilt.c_str());
         fprintf(out, "\n");
 
-        /* Original `A` lines, with contig offsets shifted by the splices that
-         * happened upstream of them (otherwise every annotation after a
-         * lengthened/shortened array would point at the wrong base). */
-        for (const std::string &a : cur.a_lines) {
+        /* A lines, with contig offsets shifted by upstream splices */
+        for (const std::string &a : a_lines) {
             if (shifts.empty()) {
                 fprintf(out, "%s\n", a.c_str());
                 continue;
@@ -766,14 +975,16 @@ bool polish_one_gfa(const std::string &gfa_name,
             fprintf(out, "%s\n", rebuilt.c_str());
         }
 
-        if (cur.seq != "*") {
-            fprintf(fa, ">%s\n", cur.name.c_str());
-            for (size_t i = 0; i < cur.seq.size(); i += 60)
-                fprintf(fa, "%.*s\n", (int)std::min<size_t>(60, cur.seq.size() - i),
-                        cur.seq.c_str() + i);
+        if (seq != "*") {
+            fprintf(fa, ">%s\n", name.c_str());
+            for (size_t i = 0; i < seq.size(); i += 60)
+                fprintf(fa, "%.*s\n", (int)std::min<size_t>(60, seq.size() - i),
+                        seq.c_str() + i);
         }
 
-        cur = Segment();
+        a_lines.clear();
+        cur_trs.clear();
+        cur_ids.clear();
         have_seg = false;
     };
 
@@ -784,33 +995,50 @@ bool polish_one_gfa(const std::string &gfa_name,
         if (line[0] == 'S' && line[1] == '\t') {
             flush_segment();
             std::string s(line, len);
-            size_t t1 = s.find('\t');
-            size_t t2 = (t1 == std::string::npos) ? std::string::npos : s.find('\t', t1 + 1);
-            size_t t3 = (t2 == std::string::npos) ? std::string::npos : s.find('\t', t2 + 1);
-            if (t2 == std::string::npos) continue;
-            cur = Segment();
-            cur.name = s.substr(t1 + 1, t2 - t1 - 1);
-            if (t3 == std::string::npos) {
-                cur.seq = s.substr(t2 + 1);
-                cur.tags.clear();
-            } else {
-                cur.seq = s.substr(t2 + 1, t3 - t2 - 1);
-                cur.tags = s.substr(t3 + 1);
-            }
+            if (!parse_s_line(s, name, seq, tags)) continue;
             have_seg = true;
-        } else if (line[0] == 'A' && line[1] == '\t') {
-            if (!have_seg) continue;
-            split_tabs(std::string(line, len), tk);
-            if (tk.size() >= 5 && tk[4] != "FAKE" && tk[4] != "*") {
-                if (cur.seen_reads.insert(tk[4]).second) cur.read_names.push_back(tk[4]);
+            a_lines.clear();
+            cur_trs.clear();
+            cur_ids.clear();
+            if (seq != "*") {
+                cur_trs = detect_trs(seq, opt->poa_max_period);
+                for (const TrRegion &tr : cur_trs) {
+                    int flank = locus_flank((long long)seq.size(), tr, opt);
+                    if (flank < 40) { cur_ids.push_back(-1); continue; }
+                    if (next_locus >= loci.size()) {
+                        fprintf(stderr,
+                                "[M::poa_polish] warning: locus mismatch in %s at %s:%lld\n",
+                                gfa_name.c_str(), name.c_str(), tr.start);
+                        cur_ids.push_back(-1);
+                        continue;
+                    }
+                    const Locus &loc = loci[next_locus];
+                    if (loc.contig != name || loc.start != tr.start || loc.end != tr.end) {
+                        fprintf(stderr,
+                                "[M::poa_polish] warning: locus mismatch in %s at %s:%lld\n",
+                                gfa_name.c_str(), name.c_str(), tr.start);
+                        cur_ids.push_back(-1);
+                        ++next_locus; // keep the sequences aligned
+                        continue;
+                    }
+                    cur_ids.push_back((int)next_locus);
+                    ++next_locus;
+                }
             }
-            cur.a_lines.push_back(std::string(line, len));
+        } else if (line[0] == 'A' && line[1] == '\t') {
+            if (have_seg) a_lines.push_back(std::string(line, len));
         } else {
             flush_segment();
             fprintf(out, "%s\n", line);
         }
     }
     flush_segment();
+
+    if (next_locus != loci.size()) {
+        fprintf(stderr,
+                "[M::poa_polish] warning: %s: used %zu of %zu loci\n",
+                gfa_name.c_str(), next_locus, loci.size());
+    }
 
     free(line);
     fclose(in);
@@ -834,14 +1062,36 @@ int poa_polish_run(const hifiasm_opt_t *opt)
         return 1;
     }
 
-    fprintf(stderr, "[M::poa_polish] post-assembly tandem-repeat polishing (%s)\n",
-            poa_version());
-
-    ReadSet reads = load_reads(opt);
-    if (reads.seq.empty()) {
-        fprintf(stderr, "[M::poa_polish] no reads loaded; skipping\n");
-        return 1;
+    if (opt->poa_seed_step >= 1 && opt->poa_seed_step <= 64) {
+        g_seed_step = opt->poa_seed_step;
+    } else {
+        fprintf(stderr,
+                "[M::poa_polish] warning: --poa-seed-step %d out of range [1,64]; using 2\n",
+                opt->poa_seed_step);
+        g_seed_step = 2;
     }
+    if (opt->poa_edge_len >= 20 && opt->poa_edge_len <= 120) {
+        g_edge_len = opt->poa_edge_len;
+    } else {
+        fprintf(stderr,
+                "[M::poa_polish] warning: --poa-edge-len %d out of range [20,120]; using 60\n",
+                opt->poa_edge_len);
+        g_edge_len = 60;
+    }
+    if (opt->poa_max_cand_bases < 0) {
+        fprintf(stderr,
+                "[M::poa_polish] warning: --poa-max-candidate-bases %lld is negative; "
+                "treating it as unlimited\n", opt->poa_max_cand_bases);
+    }
+    char capbuf[64];
+    if (opt->poa_max_cand_bases > 0)
+        snprintf(capbuf, sizeof(capbuf), "%.2f Gbp", opt->poa_max_cand_bases / 1e9);
+    else
+        snprintf(capbuf, sizeof(capbuf), "unlimited");
+    fprintf(stderr,
+            "[M::poa_polish] post-assembly tandem-repeat polishing (%s); streaming "
+            "recruitment (seed step %d, flank edge %d bp, candidate cap %s)\n",
+            poa_version(), g_seed_step, g_edge_len, capbuf);
 
     std::vector<std::string> candidates;
     const std::string out = opt->output_file_name;
@@ -869,7 +1119,7 @@ int poa_polish_run(const hifiasm_opt_t *opt)
     int n_loci = 0, n_patched = 0;
     long long bases_added = 0;
     for (const std::string &fn : candidates)
-        polish_one_gfa(fn, reads, opt, tsv, n_loci, n_patched, bases_added);
+        polish_one_gfa(fn, opt, tsv, n_loci, n_patched, bases_added);
 
     if (tsv) fclose(tsv);
 
