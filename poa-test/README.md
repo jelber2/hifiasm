@@ -84,7 +84,8 @@ make -j
 The standalone polish driver is built with:
 
 ```bash
-make poa-polish-gfa      # -> poa-test/polish_gfa <prefix> <reads.fq[.gz]> ...
+make poa-polish-gfa
+poa-test/polish_gfa --help
 ```
 
 CI note: `.github/workflows/ci.yaml` must check out submodules

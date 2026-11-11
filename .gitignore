@@ -3,3 +3,4 @@
 *.json
 /poa-ffi/target/*
 hifiasm
+/poa-test/polish_gfa

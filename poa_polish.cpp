@@ -1090,8 +1090,8 @@ int poa_polish_run(const hifiasm_opt_t *opt)
         snprintf(capbuf, sizeof(capbuf), "unlimited");
     fprintf(stderr,
             "[M::poa_polish] post-assembly tandem-repeat polishing (%s); streaming "
-            "recruitment (seed step %d, flank edge %d bp, candidate cap %s)\n",
-            poa_version(), g_seed_step, g_edge_len, capbuf);
+            "recruitment (flank %d bp, edge %d bp, seed step %d, candidate cap %s)\n",
+            poa_version(), opt->poa_flank_len, g_edge_len, g_seed_step, capbuf);
 
     std::vector<std::string> candidates;
     const std::string out = opt->output_file_name;
