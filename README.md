@@ -4,7 +4,7 @@
 # Install hifiasm (requiring g++ and zlib)
 git clone https://github.com/jelber2/hifiasm --recursive
 
-see poa-test README.md about using poa-consensus for polishing repetitive regions
+see poa-test/README.md about using poa-consensus for polishing repetitive regions
 
 cd hifiasm && make
 
