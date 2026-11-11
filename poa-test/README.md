@@ -30,10 +30,11 @@ suggestion:
    ≥ 2.5 copies.
 3. **Recover the reads that made the contig — without loading the read set.**
    Every k-mer (17 bp) of the four flank edges (left-start, left-end,
-   right-start, right-end; 60 bp each, both strand orientations) is indexed per
-   locus. The input is then streamed **once** per GFA and every 2nd k-mer of
-   each read is looked up. A read is recruited only if it hits all four sides
-   in the right order, i.e. it reaches into the distal end of the left flank,
+   right-start, right-end; 60 bp each by default, see `--poa-edge-len`) is
+   indexed per locus, in both strand orientations. The input is then streamed
+   **once** per GFA and (by default) every 2nd k-mer of each read is looked up
+   (`--poa-seed-step`). A read is recruited only if it hits all four sides in
+   the right order, i.e. it reaches into the distal end of the left flank,
    through the repeat, and past the distal end of the right flank. Only these
    cut-down reads are retained (at most 128 per locus); everything else is
    discarded as it streams past. Read orientation is handled by indexing both
@@ -122,8 +123,8 @@ reads and consensus per locus).
 
 Memory now scales with the number of repeat loci and the reads that span them,
 not with the input read set. On the 30× benchmark (371 kb genome, 6 arrays),
-peak RSS is ~105 MB; feeding the same reads 8× (0.09 Gbp) raises it only to
-~131 MB because the per-locus read cap kicks in. The index costs roughly
+peak RSS is ~109 MB; feeding the same reads 8× (0.09 Gbp) raises it only to
+~139 MB because the per-locus read cap kicks in. The index costs roughly
 350 seed k-mers per locus at the default 60 bp edge (≈15–18 KB/locus in the
 current hash representation); `--poa-edge-len 35` roughly halves that, while
 `--poa-edge-len 120` roughly doubles it. A human genome with ~1M detected arrays
@@ -156,7 +157,7 @@ controlled "assembler lost copies" input for the polish stage.
 
 ## Results (this repository, 8 threads)
 
-Reproduce with `./run_benchmark.sh` (~2 min). Reads: 4.5% ONT-R10-like error;
+Reproduce with `./run_benchmark.sh` (~1 min). Reads: 4.5% ONT-R10-like error;
 truth arrays: A 21×42, B 38×40, C 51×160 (8.2 kb), D CAG×300, E 29×170 (4.9 kb),
 F AAG×1200.
 
@@ -171,8 +172,8 @@ F AAG×1200.
 | VNTR_E | 4930 | 4930 (100%) | 4930 |
 | VNTR_F | 3600 | 3600 (100%) | 3600 |
 
-Mapped identity 99.997% in both. The pass found 6/6 loci (14, 22, 7, 24, 10,
-11 spanning reads) and changed **nothing** (18 calls across primary/hap1/hap2).
+Mapped identity 99.997% in both. The pass found 6/6 loci (12, 20, 7, 25, 7, 10
+spanning reads) and changed **nothing** (18 calls across primary/hap1/hap2).
 
 ### 20× coverage
 
@@ -180,26 +181,25 @@ Mapped identity 99.997% in both. The pass found 6/6 loci (14, 22, 7, 24, 10,
 |---|---:|---:|---:|
 | VNTR_A | 882 | 882 (100%) | 882 |
 | VNTR_B | 1520 | 1520 (100%) | 1520 |
-| VNTR_C | 8160 | **8165 (+5)** | 8165 (no spanning reads) |
+| VNTR_C | 8160 | **8165 (+5)** | 8165 (only 3 spanning reads, below floor) |
 | STR_D | 900 | 900 (100%) | 900 |
 | VNTR_E | 4930 | 4930 (100%) | 4930 |
 | VNTR_F | 3600 | 3600 (100%) | 3600 |
 
-Only the 8 kb array is slightly off, and no read spans it at 20×, so the pass
-correctly declines to touch it.
+Only the 8 kb array is slightly off, and only 3 reads span it at 20×, so the
+pass correctly declines to touch it.
 
 ### 10× coverage (assembly fragments: 4 contigs, 192 kb)
 
 | locus | truth | original | +poa-polish |
 |---|---:|---:|---:|
-| VNTR_A | 1260 | **1243 (−17)** | 1243 (4 reads, flank not anchorable) |
-| VNTR_B | 1520 | **1414 (−106)** | 1414 (0 spanning reads) |
-| VNTR_C | 5100 | 5100 (100%) | 5100 |
-| STR_D | 900 | **897 (−3)** | 897 |
+| VNTR_A | 1260 | **1243 (−17)** | 1243 (4 reads, below floor) |
+| VNTR_B | 1520 | **1414 (−106)** | 1414 (2 reads) |
+| VNTR_C | 5100 | 5100 (100%) | 5100 (2 reads) |
+| STR_D | 900 | **897 (−3)** | 897 (8 reads, within read noise) |
 
-At 10× hifiasm does lose copies, but only 0–6 reads span each array; below the
-`--poa-min-reads` floor (and in one case the consensus could not anchor both
-flanks) the pass makes no change. This is the fundamental constraint of the
+At 10× hifiasm does lose copies, but only 2–8 reads are recruited per array;
+below the `--poa-min-reads` floor the pass makes no change. This is the fundamental constraint of the
 author's flanked approach: it needs reads that span the array **and** both
 flanks.
 
@@ -213,13 +213,13 @@ reads:
 |---|---:|---:|---:|
 | VNTR_A | 882 | 819 (−63) | **882** |
 | VNTR_B | 1520 | 1406 (−114) | **1520** |
-| VNTR_C | 8160 | 7497 (−663) | **8159** |
+| VNTR_C | 8160 | 7497 (−663) | **8155** |
 | STR_D | 900 | 828 (−72) | **900** |
-| VNTR_E | 4930 | 4524 (−406) | **4928** |
-| VNTR_F | 3600 | 3312 (−288) | **3597** |
+| VNTR_E | 4930 | 4524 (−406) | **4926** |
+| VNTR_F | 3600 | 3312 (−288) | **3593** |
 
-Locus identity 91.8–92.9% before, 99.92–100% after; all six arrays restored to
-within 3 bp (four exactly, two within 2–3 bp).
+Locus identity 91.8–92.9% before, 99.75–100% after; all six arrays restored to
+within 7 bp (three exactly, three within 4–7 bp).
 
 ## Interpretation
 
