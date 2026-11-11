@@ -1,0 +1,19 @@
+[package]
+name = "poa-ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "C ABI shim around poa-consensus for hifiasm-fast"
+
+[lib]
+name = "poa_ffi"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+poa-consensus = { path = "../poa-consensus" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

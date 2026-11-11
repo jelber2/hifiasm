@@ -1,0 +1,10 @@
+[M::poa_polish] post-assembly tandem-repeat polishing (poa-consensus staticlib via poa-ffi 0.1.0)
+[M::poa_polish] loaded 1437 reads (11.15 Mbp)
+[M::poa_polish] ptg000001l 339176-339995 period=21 copies=39.0 reads=14 support=1.000->1.000 patched
+[M::poa_polish] ptg000001l 273647-275051 period=38 copies=36.9 reads=22 support=1.000->1.000 patched
+[M::poa_polish] ptg000001l 197672-205167 period=51 copies=147.0 reads=7 support=1.000->0.993 patched
+[M::poa_polish] ptg000001l 130003-130831 period=3 copies=276.0 reads=24 support=1.000->1.000 patched
+[M::poa_polish] ptg000001l 66380-70903 period=29 copies=156.0 reads=10 support=1.000->1.000 patched
+[M::poa_polish] ptg000001l 7995-11310 period=3 copies=1105.0 reads=11 support=1.000->1.000 patched
+[M::poa_polish] degraded.p_ctg.gfa: 1 contig(s), 1 polished
+[M::poa_polish] done: 6 locus/loci found, 6 patched, +1604 bp; report: degraded.poa.tsv

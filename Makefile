@@ -8,9 +8,15 @@ INCLUDES=
 OBJS=		CommandLines.o Process_Read.o Assembly.o Hash_Table.o \
 			POA.o Correct.o Levenshtein_distance.o Overlaps.o Trio.o kthread.o Purge_Dups.o \
 			htab.o hist.o sketch.o anchor.o extract.o sys.o hic.o rcut.o horder.o ecovlp.o\
-			tovlp.o inter.o kalloc.o gfa_ut.o gchain_map.o
+			tovlp.o inter.o kalloc.o gfa_ut.o gchain_map.o poa_polish.o
 EXE=		hifiasm
-LIBS=		-lz -lpthread -lm
+LIBS=		-lz -lpthread -lm -ldl
+
+# poa-consensus is a Rust crate; poa-ffi wraps it in a C ABI static library.
+POA_FFI_DIR=poa-ffi
+POA_FFI_LIB=$(POA_FFI_DIR)/target/release/libpoa_ffi.a
+POA_SRCS=$(wildcard poa-consensus/src/*.rs) $(wildcard $(POA_FFI_DIR)/src/*.rs) \
+	 poa-consensus/Cargo.toml $(POA_FFI_DIR)/Cargo.toml
 
 ifneq ($(asan),)
 	CXXFLAGS+=-fsanitize=address
@@ -28,11 +34,23 @@ endif
 
 all:$(EXE)
 
-$(EXE):$(OBJS) main.o
+$(EXE):$(OBJS) main.o $(POA_FFI_LIB)
 		$(CXX) $(CXXFLAGS) $^ -o $@ $(LIBS)
+
+$(POA_FFI_LIB):$(POA_SRCS)
+		cd $(POA_FFI_DIR) && cargo build --release
+
+poa-ffi:$(POA_FFI_LIB)
+
+# standalone driver for the post-assembly polish stage (testing aid)
+poa-polish-gfa:poa_polish.o poa-test/polish_gfa.cpp $(POA_FFI_LIB)
+		$(CXX) $(CXXFLAGS) -I. poa-test/polish_gfa.cpp poa_polish.o $(POA_FFI_LIB) -o poa-test/polish_gfa $(LIBS)
 
 clean:
 		rm -fr gmon.out *.o a.out $(EXE) *~ *.a *.dSYM
+
+clean-poa:
+		rm -fr $(POA_FFI_DIR)/target
 
 depend:
 		(LC_ALL=C; export LC_ALL; makedepend -Y -- $(CPPFLAGS) $(DFLAGS) -- *.cpp)
@@ -82,3 +100,4 @@ inter.o: inter.h Process_Read.h
 kalloc.o: kalloc.h
 gfa_ut.o: Overlaps.h
 gchain_map.o: gchain_map.h
+poa_polish.o: poa_polish.h CommandLines.h $(POA_FFI_DIR)/poa_ffi.h

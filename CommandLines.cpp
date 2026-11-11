@@ -81,6 +81,10 @@ static ko_longopt_t long_options[] = {
     { "ul-m",     ko_required_argument, 363},
     { "rl-cut",     ko_required_argument, 364},
     { "sc-cut",     ko_required_argument, 365},
+    { "poa-polish",   ko_no_argument, 366},
+    { "poa-flank",    ko_required_argument, 367},
+    { "poa-min-reads", ko_required_argument, 368},
+    { "poa-max-period", ko_required_argument, 369},
     // { "path-round",     ko_required_argument, 348},
 	{ 0, 0, 0 }
 };
@@ -222,6 +226,16 @@ void Print_H(hifiasm_opt_t* asm_opt)
     fprintf(stderr, "                 max drop [%ld]\n", asm_opt->telo_drop);
     fprintf(stderr, "    --telo-s     INT\n");
     fprintf(stderr, "                 min score for telomere reads [%ld]\n", asm_opt->telo_mic_sc);
+
+    fprintf(stderr, "  Post-assembly VNTR polishing (poa-consensus):\n");
+    fprintf(stderr, "    --poa-polish      rebuild tandem repeats from the assembled reads with poa-consensus;\n");
+    fprintf(stderr, "                      writes <prefix>.*.poa.gfa/.poa.fa plus a .poa.tsv report\n");
+    fprintf(stderr, "    --poa-flank      INT\n");
+    fprintf(stderr, "                      flank length used to anchor a repeat [%d]\n", asm_opt->poa_flank_len);
+    fprintf(stderr, "    --poa-min-reads  INT\n");
+    fprintf(stderr, "                      minimum spanning reads to polish a locus [%d]\n", asm_opt->poa_min_reads);
+    fprintf(stderr, "    --poa-max-period INT\n");
+    fprintf(stderr, "                      longest repeat unit considered [%d]\n", asm_opt->poa_max_period);
 
     fprintf(stderr, "  ONT simplex assembly (beta):\n");
     fprintf(stderr, "    --ont        assemble ONT simplex reads in fastq format\n");
@@ -366,6 +380,10 @@ void init_opt(hifiasm_opt_t* asm_opt)
     asm_opt->telo_mic_sc = 500;
 
     asm_opt->is_ont = 0;
+    asm_opt->is_poa_polish = 0;
+    asm_opt->poa_flank_len = 120;
+    asm_opt->poa_min_reads = 6;
+    asm_opt->poa_max_period = 200;
     asm_opt->is_sc = 0;
     asm_opt->chemical_cov = 1;
     asm_opt->chemical_flank = 256;
@@ -1003,6 +1021,14 @@ int CommandLine_process(int argc, char *argv[], hifiasm_opt_t* asm_opt)
             asm_opt->rl_cut = atol(opt.arg);
         } else if (c == 365) {
             asm_opt->sc_cut = atol(opt.arg);
+        } else if (c == 366) {
+            asm_opt->is_poa_polish = 1;
+        } else if (c == 367) {
+            asm_opt->poa_flank_len = atol(opt.arg);
+        } else if (c == 368) {
+            asm_opt->poa_min_reads = atol(opt.arg);
+        } else if (c == 369) {
+            asm_opt->poa_max_period = atol(opt.arg);
         } else if (c == 'l') {   ///0: disable purge_dup; 1: purge containment; 2: purge overlap
             asm_opt->purge_level_primary = asm_opt->purge_level_trio = atoi(opt.arg);
         }

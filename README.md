@@ -129,6 +129,25 @@ hifiasm -t64 --ont -o ONT.asm ONT.read.fastq.gz
 ```
 Please note that this module requires input reads in FASTQ format.
 
+#### Experimental: VNTR polishing with poa-consensus
+
+`--poa-polish` runs an optional post-assembly pass that detects tandem-repeat
+arrays in the contigs, recovers the reads spanning each array plus its flanks,
+rebuilds the array with the single-allele flanked mode of
+[poa-consensus](https://github.com/Psy-Fer/poa-consensus), and splices it back
+between the same flanks. It only rewrites a locus when the current copy number
+is inconsistent with the spanning reads.
+
+```sh
+hifiasm -t64 --ont --poa-polish -o ONT.asm ONT.read.fastq.gz
+# patched assembly: ONT.asm.bp.p_ctg.poa.gfa / .poa.fa
+# per-locus report: ONT.asm.poa.tsv
+```
+
+The original GFA is left untouched. This needs a Rust toolchain (cargo/rustc
+1.85+) at build time; see `poa-test/README.md` for options, benchmarks and
+limitations (`--poa-flank`, `--poa-min-reads`, `--poa-max-period`).
+
 
 ### <a name="hic"></a>Hi-C integration
 

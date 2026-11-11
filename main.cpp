@@ -5,6 +5,7 @@
 #include "Assembly.h"
 #include "Levenshtein_distance.h"
 #include "htab.h"
+#include "poa_polish.h"
 
 int main(int argc, char *argv[])
 {
@@ -64,7 +65,9 @@ int main(int argc, char *argv[])
 	if(asm_opt.sec_in) ret = ha_assemble_pair();
 	else if(asm_opt.dbg_ovec_cal) ret = ha_ec_dbg();
 	else ret = ha_assemble();
-	
+
+	if(asm_opt.is_poa_polish) poa_polish_run(&asm_opt);
+
     destory_opt(&asm_opt);
 	HA_MEMSTAT_AT("exit");
 	fprintf(stderr, "[M::%s] Version: %s\n", __func__, HA_VERSION);

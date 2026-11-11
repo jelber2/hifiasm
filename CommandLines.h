@@ -73,6 +73,11 @@ typedef struct {
 	int min_hist_kmer_cnt;
     int load_index_from_disk;
     int write_index_to_disk;
+    /* post-assembly tandem-repeat polishing with poa-consensus */
+    int is_poa_polish;
+    int poa_flank_len;
+    int poa_min_reads;
+    int poa_max_period;
     int number_of_round;
     int number_of_pround;
     int adapterLen;
