@@ -2,7 +2,10 @@
 
 ```sh
 # Install hifiasm (requiring g++ and zlib)
-git clone https://github.com/chhylp123/hifiasm
+git clone https://github.com/jelber2/hifiasm --recursive
+
+see poa-test README.md about using poa-consensus for polishing repetitive regions
+
 cd hifiasm && make
 
 # Run on test data (use -f0 for small datasets)
