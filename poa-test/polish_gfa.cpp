@@ -63,6 +63,10 @@ static void print_help(FILE *fh)
 "                                0 = unlimited [4000000000]\n"
 "      --max-locus-len INT       skip arrays longer than this many bp;\n"
 "                                0 = no limit [100000]\n"
+"      --min-array INT           minimum array length considered [60];\n"
+"                                use 150-200 for a WGS run (fewer seed loci)\n"
+"      --index-chunk INT         build the seed index for this many loci at a\n"
+"                                time; 0 = all at once [1000000]\n"
 "      --decompressor STR        read stream backend: auto, zlib or rapidgzip\n"
 "                                [auto; rapidgzip if found in PATH]\n"
 "      --gzip-threads INT        rapidgzip threads per input file; 0 = auto\n"
@@ -137,6 +141,8 @@ int main(int argc, char **argv)
     opt.poa_seed_step = 2;
     opt.poa_edge_len = 60;
     opt.poa_max_locus_len = 100000;
+    opt.poa_min_array = 60;
+    opt.poa_index_chunk = 1000000;
     opt.poa_decompressor = 0;
     opt.poa_gzip_threads = 0;
     unsigned hw = std::thread::hardware_concurrency();
@@ -205,6 +211,10 @@ int main(int argc, char **argv)
                            !strcmp(name, "--poa-max-candidate-bases");
             bool is_maxlocus = !strcmp(name, "--max-locus-len") ||
                                !strcmp(name, "--poa-max-locus-len");
+            bool is_minarray = !strcmp(name, "--min-array") ||
+                               !strcmp(name, "--poa-min-array");
+            bool is_chunk = !strcmp(name, "--index-chunk") ||
+                            !strcmp(name, "--poa-index-chunk");
             bool is_decomp = !strcmp(name, "--decompressor") ||
                              !strcmp(name, "--poa-decompressor");
             bool is_gzthreads = !strcmp(name, "--gzip-threads") ||
@@ -212,7 +222,7 @@ int main(int argc, char **argv)
 
             if (!is_flank && !is_min_reads && !is_max_period && !is_edge &&
                 !is_step && !is_cand && !is_maxlocus && !is_decomp &&
-                !is_gzthreads) {
+                !is_gzthreads && !is_minarray && !is_chunk) {
                 fprintf(stderr, "%s: unknown option '%s'\n", kProg, name);
                 short_usage(stderr);
                 return 2;
@@ -266,6 +276,14 @@ int main(int argc, char **argv)
                     return usage_error("--max-candidate-bases must be >= 0 "
                                        "(got %s)", val);
                 opt.poa_max_cand_bases = v;
+            } else if (is_minarray) {
+                if (v < 40)
+                    return usage_error("--min-array must be >= 40 (got %s)", val);
+                opt.poa_min_array = (int)v;
+            } else if (is_chunk) {
+                if (v < 0)
+                    return usage_error("--index-chunk must be >= 0 (got %s)", val);
+                opt.poa_index_chunk = (int)v;
             } else if (is_maxlocus) {
                 if (v < 0)
                     return usage_error("--max-locus-len must be >= 0 (got %s)", val);

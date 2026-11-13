@@ -1,12 +1,13 @@
 [M::poa_polish] post-assembly tandem-repeat polishing (poa-consensus staticlib via poa-ffi 0.1.0); streaming recruitment (flank 120 bp, edge 60 bp, seed step 2, candidate cap 4.00 Gbp)
-[M::poa_polish] degraded.p_ctg.gfa: 6 loci indexed (2112 seed k-mers); streaming reads...
+[M::poa_polish] degraded.p_ctg.gfa: chunk 1/1: loci 0-6 (6 loci, 2112 seed k-mers); streaming reads...
 [M::poa_polish] decompressor: zlib (plain files bypass it)
-[M::poa_polish] degraded.p_ctg.gfa: streamed 1437 reads (0.01 Gbp), kept 82 reads spanning 6 loci (0.21 Mbp); detect 0.01s, index 0.00s, stream 0.10s (114.2 Mbp/s)
-[M::poa_polish] ptg000001l 339176-339995 period=21 copies=39.0 reads=12 support=1.000->1.000 med=880 [874..890] patched (0.18s)
-[M::poa_polish] ptg000001l 273647-275051 period=38 copies=36.9 reads=21 support=1.000->1.000 med=1513 [1496..1527] patched (1.08s)
-[M::poa_polish] ptg000001l 197672-205167 period=51 copies=147.0 reads=7 support=1.000->0.994 med=8131 [8121..8147] patched (3.37s)
-[M::poa_polish] ptg000001l 130003-130831 period=3 copies=276.0 reads=25 support=1.000->1.000 med=897 [883..908] patched (0.86s)
-[M::poa_polish] ptg000001l 66380-70903 period=29 copies=156.0 reads=7 support=1.000->0.990 med=4920 [4895..4942] patched (1.36s)
+[M::poa_polish] degraded.p_ctg.gfa: chunk 1/1: 1437 reads, kept 82 (0.21 Mbp), 0.10s (109.9 Mbp/s)
+[M::poa_polish] degraded.p_ctg.gfa: 6 loci, 1 chunk(s), kept 82 reads (0.21 Mbp); detect 0.02s, index 0.00s, stream 0.10s (109.9 Mbp/s aggregate)
+[M::poa_polish] ptg000001l 339176-339995 period=21 copies=39.0 reads=12 support=1.000->1.000 med=880 [874..890] patched (0.17s)
+[M::poa_polish] ptg000001l 273647-275051 period=38 copies=36.9 reads=21 support=1.000->1.000 med=1513 [1496..1527] patched (0.99s)
+[M::poa_polish] ptg000001l 197672-205167 period=51 copies=147.0 reads=7 support=1.000->0.994 med=8131 [8121..8147] patched (3.20s)
+[M::poa_polish] ptg000001l 130003-130831 period=3 copies=276.0 reads=25 support=1.000->1.000 med=897 [883..908] patched (0.77s)
+[M::poa_polish] ptg000001l 66380-70903 period=29 copies=156.0 reads=7 support=1.000->0.990 med=4920 [4895..4942] patched (1.32s)
 [M::poa_polish] ptg000001l 7995-11310 period=3 copies=1105.0 reads=10 support=1.000->1.000 med=3596 [3576..3613] patched (1.21s)
-[M::poa_polish] degraded.p_ctg.gfa: 1 contig(s), 1 polished; timing: detect 0.01s, index 0.00s, stream 0.10s, patch 3.38s (poa 3.37s), total 3.49s
+[M::poa_polish] degraded.p_ctg.gfa: 1 contig(s), 1 polished; timing: detect 0.02s, index 0.00s, stream 0.10s, patch 3.22s (poa 3.20s), total 3.34s
 [M::poa_polish] done: 6 locus/loci found, 6 patched, +1597 bp; report: degraded.poa.tsv

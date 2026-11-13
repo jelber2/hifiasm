@@ -89,6 +89,8 @@ static ko_longopt_t long_options[] = {
     { "poa-seed-step", ko_required_argument, 371},
     { "poa-edge-len", ko_required_argument, 372},
     { "poa-max-locus-len", ko_required_argument, 373},
+    { "poa-min-array", ko_required_argument, 376},
+    { "poa-index-chunk", ko_required_argument, 377},
     { "poa-decompressor", ko_required_argument, 374},
     { "poa-gzip-threads", ko_required_argument, 375},
     // { "path-round",     ko_required_argument, 348},
@@ -254,6 +256,13 @@ void Print_H(hifiasm_opt_t* asm_opt)
     fprintf(stderr, "    --poa-max-locus-len INT\n");
     fprintf(stderr, "                      skip arrays longer than this (0 = no limit) [%d]\n",
                                       asm_opt->poa_max_locus_len);
+    fprintf(stderr, "    --poa-min-array   INT\n");
+    fprintf(stderr, "                      minimum array length considered [%d]\n",
+                                      asm_opt->poa_min_array);
+    fprintf(stderr, "    --poa-index-chunk INT\n");
+    fprintf(stderr, "                      build the seed index for this many loci at a time;\n");
+    fprintf(stderr, "                      0 = all loci at once [%d]\n",
+                                      asm_opt->poa_index_chunk);
     fprintf(stderr, "    --poa-decompressor STR\n");
     fprintf(stderr, "                      read stream backend: auto, zlib or rapidgzip [auto]\n");
     fprintf(stderr, "    --poa-gzip-threads INT\n");
@@ -410,6 +419,8 @@ void init_opt(hifiasm_opt_t* asm_opt)
     asm_opt->poa_seed_step = 2;
     asm_opt->poa_edge_len = 60;
     asm_opt->poa_max_locus_len = 100000;
+    asm_opt->poa_min_array = 60;
+    asm_opt->poa_index_chunk = 1000000;
     asm_opt->poa_decompressor = 0;
     asm_opt->poa_gzip_threads = 0;
     asm_opt->is_sc = 0;
@@ -1065,6 +1076,10 @@ int CommandLine_process(int argc, char *argv[], hifiasm_opt_t* asm_opt)
             asm_opt->poa_edge_len = atol(opt.arg);
         } else if (c == 373) {
             asm_opt->poa_max_locus_len = atol(opt.arg);
+        } else if (c == 376) {
+            asm_opt->poa_min_array = atol(opt.arg);
+        } else if (c == 377) {
+            asm_opt->poa_index_chunk = atol(opt.arg);
         } else if (c == 374) {
             if (!strcmp(opt.arg, "auto")) asm_opt->poa_decompressor = 0;
             else if (!strcmp(opt.arg, "zlib")) asm_opt->poa_decompressor = 1;

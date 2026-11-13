@@ -116,6 +116,8 @@ hifiasm --ont --poa-polish -t32 -o sample sample.fq.gz
 | `--poa-seed-step INT` | 2 | check every Nth read k-mer; 1 is most sensitive, 4–8 faster but may miss heavily errored flanks |
 | `--poa-edge-len INT` | 60 | bp at each flank end used for seeding/anchoring (20–120); larger is more sensitive and uses more index memory |
 | `--poa-max-locus-len INT` | 100000 | skip arrays longer than this (flanked POA is impractical there); `0` = no limit |
+| `--poa-min-array INT` | 60 | minimum array length considered; raise to 150–200 for WGS to avoid millions of short-STR seed loci |
+| `--poa-index-chunk INT` | 1000000 | build the seed index for this many loci at a time (each chunk streams the reads once); `0` = all loci at once |
 | `--poa-decompressor STR` | auto | read stream backend: `auto`, `zlib` or `rapidgzip`; auto uses rapidgzip when it is in `PATH` |
 | `--poa-gzip-threads INT` | 0 (auto) | rapidgzip decoder threads per input file; auto = `(threads / 2) / files` |
 
@@ -169,16 +171,35 @@ at the measured ~140 Mbp/s that is ~13 min per GFA, ~40 min for
 primary+hap1+hap2. With rapidgzip (~320–435 Mbp/s on the test, and higher on
 larger files) decompression is no longer the limit; the scan/lookups take over,
 so expect roughly 5–12 min per GFA and 15–35 min for trio output on ~8 cores.
-Plain (uncompressed) FASTQ avoids the gzip stage entirely. The index for ~1M detected arrays
-costs ~15–20 GB. The candidate-read cap is the other memory knob: the default
+Plain (uncompressed) FASTQ avoids the gzip stage entirely. The index costs ~22 KB per detected array at the default 60 bp
+edge (measured: 14,500 short arrays → ~320 MB RSS), so ~1M arrays is ~20 GB,
+~4M is ~90 GB and ~8M is ~180 GB. The default `--poa-min-array 60` can detect
+millions of short STRs in a human genome; for WGS use `--poa-min-array 150`
+(or 200), which typically leaves a few hundred thousand loci. The pass prints
+an estimate and warns above 500k loci (or ~8 GB) before building the index.
+`--poa-edge-len 35` reduces the index a further ~2.3×.
+
+When there are more loci than fit comfortably, the index is built in chunks of
+`--poa-index-chunk` loci (default 1M). Every chunk streams the reads once, so
+N loci need ceil(N / chunk) read passes. For example, 8M loci at 1M per chunk
+is 8 passes; with rapidgzip (~4–5 min per 103 Gbp pass) that is ~35–40 min,
+with a peak index of ~22 GB instead of ~180 GB. The candidate-read cap is
+global across chunks, so if it is reached the remaining chunks are skipped;
+set it above the expected trimmed bases for a complete pass. The candidate-read cap is the other memory knob: the default
 4 Gbp is too small at this scale (it will stop the stream early), so raise it,
 e.g.:
 
 ```bash
 hifiasm -t32 --ont --poa-polish \
+    --poa-min-array 150 \
     --poa-max-candidate-bases 20000000000 \
     -o asm reads.fq.gz
 ```
+
+FASTA input does **not** reduce the index memory; it only cuts decompression
+and parsing time (the pass copies sequences, not qualities). `kseq` accepts
+FASTA, so converting is a speed optimisation, not a memory fix. If disk allows,
+plain or gzipped FASTA is 1.5–2× faster to stream.
 
 That allows ~20 Gbp of trimmed reads (~22 GB) and gives a total pass footprint
 of roughly 40–45 GB. The cap is a safety limit: once it is reached the remaining

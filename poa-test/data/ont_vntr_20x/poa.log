@@ -3,7 +3,7 @@ Loading ma_hit_ts from disk...
 ma_hit_ts has been read.
 Loading ma_hit_ts from disk... 
 ma_hit_ts has been read.
-[M::ha_assemble::0.008*1.19] ==> loaded corrected reads and overlaps from disk
+[M::ha_assemble::0.008*1.20] ==> loaded corrected reads and overlaps from disk
 [M::ha_opt_update_cov_min] updated max_n_chain to 100
 [M::gen_chemical_arc_rf] # chimeric reads: 60
 [M::purge_dups] homozygous read coverage threshold: 17
@@ -31,9 +31,10 @@ Writing poa.bp.hap1.p_ctg.gfa to disk...
 Writing poa.bp.hap2.p_ctg.gfa to disk... 
 Inconsistency threshold for low-quality regions in BED files: 70%
 [M::poa_polish] post-assembly tandem-repeat polishing (poa-consensus staticlib via poa-ffi 0.1.0); streaming recruitment (flank 120 bp, edge 60 bp, seed step 2, candidate cap 4.00 Gbp)
-[M::poa_polish] poa.bp.p_ctg.gfa: 7 loci indexed (2106 seed k-mers); streaming reads...
+[M::poa_polish] poa.bp.p_ctg.gfa: chunk 1/1: loci 0-7 (7 loci, 2106 seed k-mers); streaming reads...
 [M::poa_polish] decompressor: zlib (plain files bypass it)
-[M::poa_polish] poa.bp.p_ctg.gfa: streamed 951 reads (0.01 Gbp), kept 66 reads spanning 7 loci (0.16 Mbp); detect 0.01s, index 0.00s, stream 0.06s (120.3 Mbp/s)
+[M::poa_polish] poa.bp.p_ctg.gfa: chunk 1/1: 951 reads, kept 66 (0.16 Mbp), 0.07s (113.8 Mbp/s)
+[M::poa_polish] poa.bp.p_ctg.gfa: 7 loci, 1 chunk(s), kept 66 reads (0.16 Mbp); detect 0.02s, index 0.00s, stream 0.07s (113.8 Mbp/s aggregate)
 [M::poa_polish] ptg000001l 340723-341605 period=21 copies=42.0 reads=8 support=-1.000->-1.000 med=880 [873..890] unchanged_read_length (0.00s)
 [M::poa_polish] ptg000001l 275083-276601 period=38 copies=39.9 reads=15 support=-1.000->-1.000 med=1515 [1503..1526] unchanged_read_length (0.00s)
 [M::poa_polish] ptg000001l 206210-206604 period=51 copies=7.7 reads=4 support=-1.000->-1.000 med=394 [0..0] skip:insufficient_reads (0.00s)
@@ -41,10 +42,10 @@ Inconsistency threshold for low-quality regions in BED files: 70%
 [M::poa_polish] ptg000001l 130699-131599 period=3 copies=300.0 reads=17 support=-1.000->-1.000 med=896 [887..907] unchanged_read_length (0.00s)
 [M::poa_polish] ptg000001l 66669-71598 period=29 copies=170.0 reads=4 support=-1.000->-1.000 med=4929 [0..0] skip:insufficient_reads (0.00s)
 [M::poa_polish] ptg000001l 7995-11598 period=3 copies=1201.0 reads=7 support=-1.000->-1.000 med=3596 [3586..3613] unchanged_read_length (0.00s)
-[M::poa_polish] poa.bp.p_ctg.gfa: 2 contig(s), 0 polished; timing: detect 0.01s, index 0.00s, stream 0.06s, patch 0.01s (poa 0.00s), total 0.08s
-[M::poa_polish] poa.bp.hap1.p_ctg.gfa: 7 loci indexed (2106 seed k-mers); streaming reads...
-[M::poa_polish] decompressor: zlib (plain files bypass it)
-[M::poa_polish] poa.bp.hap1.p_ctg.gfa: streamed 951 reads (0.01 Gbp), kept 66 reads spanning 7 loci (0.16 Mbp); detect 0.00s, index 0.00s, stream 0.06s (122.8 Mbp/s)
+[M::poa_polish] poa.bp.p_ctg.gfa: 2 contig(s), 0 polished; timing: detect 0.02s, index 0.00s, stream 0.07s, patch 0.01s (poa 0.00s), total 0.09s
+[M::poa_polish] poa.bp.hap1.p_ctg.gfa: chunk 1/1: loci 0-7 (7 loci, 2106 seed k-mers); streaming reads...
+[M::poa_polish] poa.bp.hap1.p_ctg.gfa: chunk 1/1: 951 reads, kept 66 (0.16 Mbp), 0.07s (108.6 Mbp/s)
+[M::poa_polish] poa.bp.hap1.p_ctg.gfa: 7 loci, 1 chunk(s), kept 66 reads (0.16 Mbp); detect 0.00s, index 0.00s, stream 0.07s (108.6 Mbp/s aggregate)
 [M::poa_polish] h1tg000001l 340723-341605 period=21 copies=42.0 reads=8 support=-1.000->-1.000 med=880 [873..890] unchanged_read_length (0.00s)
 [M::poa_polish] h1tg000001l 275083-276601 period=38 copies=39.9 reads=15 support=-1.000->-1.000 med=1515 [1503..1526] unchanged_read_length (0.00s)
 [M::poa_polish] h1tg000001l 206210-206604 period=51 copies=7.7 reads=4 support=-1.000->-1.000 med=394 [0..0] skip:insufficient_reads (0.00s)
@@ -52,18 +53,18 @@ Inconsistency threshold for low-quality regions in BED files: 70%
 [M::poa_polish] h1tg000001l 130699-131599 period=3 copies=300.0 reads=17 support=-1.000->-1.000 med=896 [887..907] unchanged_read_length (0.00s)
 [M::poa_polish] h1tg000001l 66669-71598 period=29 copies=170.0 reads=4 support=-1.000->-1.000 med=4929 [0..0] skip:insufficient_reads (0.00s)
 [M::poa_polish] h1tg000001l 7995-11598 period=3 copies=1201.0 reads=7 support=-1.000->-1.000 med=3596 [3586..3613] unchanged_read_length (0.00s)
-[M::poa_polish] poa.bp.hap1.p_ctg.gfa: 2 contig(s), 0 polished; timing: detect 0.00s, index 0.00s, stream 0.06s, patch 0.01s (poa 0.00s), total 0.07s
-[M::poa_polish] poa.bp.hap2.p_ctg.gfa: 6 loci indexed (1886 seed k-mers); streaming reads...
-[M::poa_polish] decompressor: zlib (plain files bypass it)
-[M::poa_polish] poa.bp.hap2.p_ctg.gfa: streamed 951 reads (0.01 Gbp), kept 62 reads spanning 6 loci (0.14 Mbp); detect 0.01s, index 0.00s, stream 0.06s (116.0 Mbp/s)
+[M::poa_polish] poa.bp.hap1.p_ctg.gfa: 2 contig(s), 0 polished; timing: detect 0.00s, index 0.00s, stream 0.07s, patch 0.01s (poa 0.00s), total 0.08s
+[M::poa_polish] poa.bp.hap2.p_ctg.gfa: chunk 1/1: loci 0-6 (6 loci, 1886 seed k-mers); streaming reads...
+[M::poa_polish] poa.bp.hap2.p_ctg.gfa: chunk 1/1: 951 reads, kept 62 (0.14 Mbp), 0.06s (116.6 Mbp/s)
+[M::poa_polish] poa.bp.hap2.p_ctg.gfa: 6 loci, 1 chunk(s), kept 62 reads (0.14 Mbp); detect 0.00s, index 0.00s, stream 0.06s (116.6 Mbp/s aggregate)
 [M::poa_polish] h2tg000001l 340720-341602 period=21 copies=42.0 reads=8 support=-1.000->-1.000 med=880 [873..890] unchanged_read_length (0.00s)
 [M::poa_polish] h2tg000001l 275080-276598 period=38 copies=39.9 reads=15 support=-1.000->-1.000 med=1515 [1503..1526] unchanged_read_length (0.00s)
-[M::poa_polish] h2tg000001l 198443-206205 period=51 copies=152.2 reads=11 support=0.949->-1.000 med=2047 [523..7727] skip:flank_not_anchored (21.27s)
+[M::poa_polish] h2tg000001l 198443-206205 period=51 copies=152.2 reads=11 support=0.949->-1.000 med=2047 [523..7727] skip:flank_not_anchored (21.45s)
 [M::poa_polish] h2tg000001l 130701-131601 period=3 copies=300.0 reads=17 support=-1.000->-1.000 med=896 [887..907] unchanged_read_length (0.00s)
 [M::poa_polish] h2tg000001l 66669-71598 period=29 copies=170.0 reads=4 support=-1.000->-1.000 med=4929 [0..0] skip:insufficient_reads (0.00s)
 [M::poa_polish] h2tg000001l 7995-11598 period=3 copies=1201.0 reads=7 support=-1.000->-1.000 med=3596 [3586..3613] unchanged_read_length (0.00s)
-[M::poa_polish] poa.bp.hap2.p_ctg.gfa: 1 contig(s), 0 polished; timing: detect 0.01s, index 0.00s, stream 0.06s, patch 21.28s (poa 21.27s), total 21.35s
+[M::poa_polish] poa.bp.hap2.p_ctg.gfa: 1 contig(s), 0 polished; timing: detect 0.00s, index 0.00s, stream 0.06s, patch 21.46s (poa 21.45s), total 21.52s
 [M::poa_polish] done: 20 locus/loci found, 0 patched, +0 bp; report: poa.poa.tsv
 [M::main] Version: 0.25.0-r726
 [M::main] CMD: /home/jelber2/git/hifiasm-fast/hifiasm --ont --poa-polish -t 8 -o poa reads.fq.gz
-[M::main] Real time: 21.529 sec; CPU: 21.704 sec; Peak RSS: 0.727 GB
+[M::main] Real time: 21.724 sec; CPU: 21.934 sec; Peak RSS: 0.734 GB

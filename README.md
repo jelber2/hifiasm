@@ -153,7 +153,7 @@ already matches the spanning reads. This needs a Rust toolchain (cargo/rustc 1.8
 `poa-test/README.md` for options, benchmarks and limitations (`--poa-flank`,
 `--poa-min-reads`, `--poa-max-period`, `--poa-max-candidate-bases`,
 `--poa-seed-step`, `--poa-edge-len`, `--poa-max-locus-len`,
-`--poa-decompressor`, `--poa-gzip-threads`).
+`--poa-decompressor`, `--poa-gzip-threads`, `--poa-index-chunk`).
 
 
 ### <a name="hic"></a>Hi-C integration
