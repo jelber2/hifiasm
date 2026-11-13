@@ -3,9 +3,9 @@ Loading ma_hit_ts from disk...
 ma_hit_ts has been read.
 Loading ma_hit_ts from disk... 
 ma_hit_ts has been read.
-[M::ha_assemble::0.002*1.63] ==> loaded corrected reads and overlaps from disk
+[M::ha_assemble::0.004*1.45] ==> loaded corrected reads and overlaps from disk
 [M::ha_opt_update_cov_min] updated max_n_chain to 100
-[M::gen_chemical_arc_rf] # chimeric reads: 174
+[M::gen_chemical_arc_rf] # chimeric reads: 175
 [M::purge_dups] homozygous read coverage threshold: 5
 [M::purge_dups] purge duplication coverage threshold: 7
 [M::ug_ext_gfa::] # tips::4
@@ -28,4 +28,4 @@ Writing base.bp.hap2.p_ctg.gfa to disk...
 Inconsistency threshold for low-quality regions in BED files: 70%
 [M::main] Version: 0.25.0-r726
 [M::main] CMD: /home/jelber2/git/hifiasm-fast/hifiasm --ont -t 8 -o base reads.fq.gz
-[M::main] Real time: 0.009 sec; CPU: 0.027 sec; Peak RSS: 0.012 GB
+[M::main] Real time: 0.013 sec; CPU: 0.032 sec; Peak RSS: 0.012 GB

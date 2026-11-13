@@ -32,8 +32,9 @@ suggestion:
    Every k-mer (17 bp) of the four flank edges (left-start, left-end,
    right-start, right-end; 60 bp each by default, see `--poa-edge-len`) is
    indexed per locus, in both strand orientations. The input is then streamed
-   **once** per GFA and (by default) every 2nd k-mer of each read is looked up
-   (`--poa-seed-step`). A read is recruited only if it hits all four sides in
+   **once** per GFA through a producer/worker pipeline (`-t` workers, up to four
+   producer threads for multi-file input, 1 MB read buffer) and (by default)
+   every 2nd k-mer of each read is looked up (`--poa-seed-step`). A read is recruited only if it hits all four sides in
    the right order, i.e. it reaches into the distal end of the left flank,
    through the repeat, and past the distal end of the right flank. Only these
    cut-down reads are retained (at most 128 per locus); everything else is
@@ -54,8 +55,9 @@ suggestion:
      than the old repeat's,
    * the contig's current length is a clear outlier against the median repeat
      length measured in the recruited reads (median absolute deviation), and
-     the consensus moves it closer. This prevents chasing consensus noise on an
-     already-correct array,
+     the consensus moves it closer. This check is applied **before** the POA
+     call: an already-consistent array is left alone without spending the
+     expensive DP,
    * at least `--poa-min-reads` reads span the locus.
 
 The original GFA is never modified. Outputs:
@@ -85,7 +87,7 @@ The standalone polish driver is built with:
 
 ```bash
 make poa-polish-gfa
-poa-test/polish_gfa --help
+poa-test/polish_gfa --help          # includes -t/--threads
 ```
 
 CI note: `.github/workflows/ci.yaml` must check out submodules
@@ -108,6 +110,7 @@ hifiasm --ont --poa-polish -t32 -o sample sample.fq.gz
 | `--poa-max-candidate-bases INT` | 4,000,000,000 | cap on the cut-down reads kept in memory (repeat+flanks, counted once per locus they span); `0` = unlimited |
 | `--poa-seed-step INT` | 2 | check every Nth read k-mer; 1 is most sensitive, 4–8 faster but may miss heavily errored flanks |
 | `--poa-edge-len INT` | 60 | bp at each flank end used for seeding/anchoring (20–120); larger is more sensitive and uses more index memory |
+| `--poa-max-locus-len INT` | 100000 | skip arrays longer than this (flanked POA is impractical there); `0` = no limit |
 
 For example, maximum sensitivity on a 256 GiB machine:
 
@@ -121,6 +124,64 @@ hifiasm --ont --poa-polish \
 
 Only `POA_POLISH_DEBUG_DIR` remains an environment variable (it dumps the cut
 reads and consensus per locus).
+
+### Performance
+
+Read recruitment and POA are both parallel:
+
+* the read stream is a producer/worker pipeline: one or more producer threads
+  decompress and parse the FASTQ, `-t` worker threads scan/cut, and results are
+  merged in read order (byte-identical to a serial run);
+* POA calls are independent per locus and run on the same `-t` threads;
+* loci whose length already agrees with the reads are skipped before POA, so a
+  correct assembly pays only for the stream.
+
+hifiasm passes its own `-t` value; `polish_gfa` defaults to all available CPUs
+(`polish_gfa -t N`). Measured on the benchmark (8 threads):
+
+* 11 Mbp/GFA: stream 0.08–0.10 s (~110–130 Mbp/s), patch ~0 s; previously
+  ~0.16 s stream + ~6 s POA per GFA;
+* 89 Mbp/GFA (same reads ×8): stream 0.60 s with 8 workers versus 0.70 s with
+  one worker — one gzip producer is the floor at ~140–150 Mbp/s; with multiple
+  input files up to four producers run in parallel;
+* controlled 8%-deletion repair (6 loci): ~3.4 s total, dominated by the 8.1 kb
+  array (~3.2 s); the other five take 0.2–1.3 s each and run concurrently.
+
+### Genome scale
+
+For 34× of a 3.2 Gbp genome there are ~108.8 Gbp of reads **per GFA**. At the
+measured ~140 Mbp/s that is ~13 min per GFA, ~40 min for primary+hap1+hap2;
+with a human-size seed index (GBs, cache-missing lookups) expect roughly
+15–25 min per GFA, 45–75 min for trio output. The index for ~1M detected arrays
+costs ~15–20 GB. The candidate-read cap is the other memory knob: the default
+4 Gbp is too small at this scale (it will stop the stream early), so raise it,
+e.g.:
+
+```bash
+hifiasm -t32 --ont --poa-polish \
+    --poa-max-candidate-bases 20000000000 \
+    -o asm reads.fq.gz
+```
+
+That allows ~20 Gbp of trimmed reads (~22 GB) and gives a total pass footprint
+of roughly 40–45 GB. The cap is a safety limit: once it is reached the remaining
+reads are not scanned (the exact subset can vary slightly between thread
+counts), so set it above the expected number of trimmed bases for a complete
+pass. Lower it on smaller machines or raise it if many long
+arrays are present. With one gzip file the producer is single-threaded; if you
+have multiple read files they are decompressed in parallel (up to four
+producers), and uncompressed FASTQ avoids the gzip floor entirely.
+
+At most ~64 kb of recruited reads are passed to POA per locus (evenly sampled),
+which bounds the critical path for very long arrays. This budget applies to the
+**trimmed** `[flank | repeat | flank]` reads, not to the raw read length: a
+1 Mbp ultra-long read spanning a 5 kb array contributes a ~5.2 kb cut. Only
+arrays longer than `--poa-max-locus-len` (default 100 kb) are skipped
+(`skip:array_too_long`), because a single cut is then hundreds of kb and
+flanked POA is not practical. Tested with two 1 Mbp reads (forward and
+reverse-complement, generated by `make_ultra_reads.py`): the cut lengths were
+1.1 kb for the 882 bp array and 8.4 kb for the 8.1 kb array, the stream cost
+rose by only ~0.04 s, and the repaired assembly reached 99.997% identity.
 
 Memory now scales with the number of repeat loci and the reads that span them,
 not with the input read set. On the 30× benchmark (371 kb genome, 6 arrays),
@@ -155,6 +216,17 @@ including homopolymer-rich units.
 
 `degrade_contig.py` deletes a fraction of every array from a contig, producing a
 controlled "assembler lost copies" input for the polish stage.
+
+`make_ultra_reads.py` embeds a reference in random sequence and writes matching
+forward/reverse-complement reads of arbitrary length (1 Mbp by default). With
+`POA_POLISH_DEBUG_DIR` you can confirm that each locus receives only its
+`[flank | repeat | flank]` cut, never the full ultra-long read:
+
+```bash
+./make_ultra_reads.py --ref data/ont_vntr_30x/ref.fa --outdir data/ont_vntr_30x
+poa-test/polish_gfa data/ont_vntr_30x/degraded reads.fq.gz \
+    data/ont_vntr_30x/ultra_fwd.fa data/ont_vntr_30x/ultra_rev.fa
+```
 
 ## Results (this repository, 8 threads)
 
@@ -217,10 +289,10 @@ reads:
 | VNTR_C | 8160 | 7497 (−663) | **8155** |
 | STR_D | 900 | 828 (−72) | **900** |
 | VNTR_E | 4930 | 4524 (−406) | **4926** |
-| VNTR_F | 3600 | 3312 (−288) | **3593** |
+| VNTR_F | 3600 | 3312 (−288) | **3600** |
 
-Locus identity 91.8–92.9% before, 99.75–100% after; all six arrays restored to
-within 7 bp (three exactly, three within 4–7 bp).
+Locus identity 91.8–92.9% before, 99.83–100% after; all six arrays restored to
+within 5 bp (four exactly, C −5 and E −4).
 
 ## Interpretation
 
@@ -258,6 +330,7 @@ poa_polish.cpp/.h        hifiasm post-assembly pass
 poa-test/sim_ont_vntr.py ONT VNTR read simulator
 poa-test/eval.py         copy-number + identity evaluation
 poa-test/degrade_contig.py  controlled copy-number damage
+poa-test/make_ultra_reads.py 1 Mbp ultra-long test reads
 poa-test/polish_gfa.cpp  standalone polish driver
 poa-test/run_benchmark.sh  end-to-end benchmark
 poa-test/data/           30x / 20x / 10x datasets and outputs

@@ -23,6 +23,12 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -43,7 +49,12 @@
 #include "poa_polish.h"
 #include "poa-ffi/poa_ffi.h"
 
-KSEQ_INIT(gzFile, gzread)
+#define KSEQ_INIT_BUF(type_t, __read, __bufsize) \
+    KSTREAM_INIT(type_t, __read, __bufsize) \
+    __KSEQ_TYPE(type_t) \
+    __KSEQ_BASIC(static klib_unused, type_t) \
+    __KSEQ_READ(static klib_unused)
+KSEQ_INIT_BUF(gzFile, gzread, 1048576)
 
 namespace {
 
@@ -79,6 +90,12 @@ struct Locus {
     std::vector<long long> spans;
 };
 
+static double now_s()
+{
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
+
 struct LocusStat {
     std::string contig;
     long long start, end;
@@ -86,6 +103,7 @@ struct LocusStat {
     long long old_len, new_len;
     int n_reads;
     double cont_old, cont_new;
+    long long span_med = 0, span_min = 0, span_max = 0;
     std::string status;
 };
 
@@ -356,7 +374,7 @@ void build_index(const std::vector<Locus> &loci, SeedIndex &idx)
 }
 
 /* ------------------------------------------------------------------------- */
-/* read recruitment (single streaming pass)                                   */
+/* read recruitment (producer / worker pipeline)                              */
 /* ------------------------------------------------------------------------- */
 
 struct FoundHit {
@@ -365,6 +383,19 @@ struct FoundHit {
     int offset;
     uint8_t strand;
     uint8_t side;
+};
+
+struct CutRecord {
+    uint64_t key;
+    uint32_t locus;
+    uint8_t strand;
+    std::string seq;
+    long long span;
+};
+
+struct RecruitCtx {
+    std::vector<FoundHit> found;
+    std::string scratch;
 };
 
 struct RecruitStats {
@@ -376,20 +407,24 @@ struct RecruitStats {
 };
 
 /**
- * Stream a read past the seed index and, if it spans a locus plus both flanks,
- * store the cut-down sequence for that locus. Nothing else is retained.
+ * Scan a read against the locus seed index and append one CutRecord per locus
+ * the read spans with both full flanks. Thread-safe: all mutable state is in
+ * `ctx`/`out` (one per worker).
  */
-void recruit_read(const std::string &read,
-                  std::vector<Locus> &loci,
+void recruit_read(const std::string &read, uint64_t key,
+                  const std::vector<Locus> &loci,
                   const SeedIndex &idx,
-                  std::vector<FoundHit> &found,
+                  RecruitCtx &ctx,
+                  std::vector<CutRecord> &out,
                   size_t cap_bases,
-                  RecruitStats &st,
-                  size_t &stored_bases,
-                  std::string &scratch)
+                  std::atomic<size_t> *soft_bases,
+                  std::atomic<bool> *soft_capped)
 {
     const long long n = (long long)read.size();
+    std::vector<FoundHit> &found = ctx.found;
+    std::string &scratch = ctx.scratch;
     found.clear();
+
     const uint64_t mask = (1ULL << (2 * RECRUIT_K)) - 1;
     uint64_t code = 0;
     int run = 0;
@@ -422,6 +457,7 @@ void recruit_read(const std::string &read,
         return a.pos < b.pos;
     });
 
+    bool have_rc = false;
     size_t i = 0;
     while (i < found.size()) {
         size_t j = i + 1;
@@ -447,19 +483,19 @@ void recruit_read(const std::string &read,
                 off = E - off - RECRUIT_K;
             }
             switch (found[t].side) {
-            case 0: // left flank start
+            case 0:
                 ls_v.push_back(pos - off);
                 l_start_min_off = std::min(l_start_min_off, off);
                 break;
-            case 1: // left flank end == repeat start
+            case 1:
                 le_v.push_back(pos + E - off);
                 ++n_l_end;
                 break;
-            case 2: // right flank start == repeat end
+            case 2:
                 rs_v.push_back(pos - off);
                 ++n_r_start;
                 break;
-            default: // right flank end
+            default:
                 re_v.push_back(pos + E - off);
                 r_end_max_off = std::max(r_end_max_off, off);
                 break;
@@ -467,10 +503,6 @@ void recruit_read(const std::string &read,
         }
         i = j;
 
-        /* A read that truly spans the locus contains the distal end of each
-         * flank and at least one seed at each repeat boundary. The read-length
-         * floor rejects short reads that merely dip into one flank (they used
-         * to let a 4-5 kb read "span" an 8 kb array). */
         if (ls_v.empty() || re_v.empty() || le_v.empty() || rs_v.empty()) continue;
         if (n < (long long)(0.7 * region_len)) continue;
         if (l_start_min_off > 20 || r_end_max_off < E - RECRUIT_K - 20) continue;
@@ -485,33 +517,192 @@ void recruit_read(const std::string &read,
         const long long rs = median(rs_v);
         const long long re = median(re_v);
         if (!(ls < le && le <= rs && rs < re)) continue;
+        long long span = rs - le;
 
-        /* Both flank boundaries must be fully inside the read. */
-        if (ls < 10 || re > n - 10) continue;
+        if (strand == 1 && !have_rc) { scratch = revcomp(read); have_rc = true; }
+        const std::string &rd = (strand == 0) ? read : scratch;
 
-        const long long span = rs - le;
-        if (span < (long long)(0.2 * region_len)) continue;
-        if (loc.cut_reads.size() >= (size_t)MAX_READS_PER_LOCUS) continue;
+        int lprobe = -1, loff = -1, rprobe = -1, roff = -1;
+        for (int off : {loc.flank - 16, loc.flank - 24, loc.flank - 32, loc.flank - 40}) {
+            if (off < 0 || off + 16 > (int)loc.left.size()) continue;
+            size_t p = rd.find(loc.left.substr(off, 16));
+            if (p != std::string::npos) { lprobe = (int)p; loff = off; break; }
+        }
+        for (int off : {0, 8, 16, 24}) {
+            if (off + 16 > (int)loc.right.size()) continue;
+            size_t p = rd.rfind(loc.right.substr(off, 16));
+            if (p != std::string::npos) { rprobe = (int)p; roff = off; break; }
+        }
 
         long long a = ls - 10;
         long long b = re + 10;
+        if (lprobe >= 0 && rprobe > lprobe) {
+            const long long pspan = (long long)(rprobe - roff) -
+                                    ((long long)lprobe - loff + loc.flank);
+            if (pspan >= (long long)(0.2 * region_len)) {
+                span = pspan;
+                a = (long long)lprobe - loff - 10;
+                b = (long long)rprobe + loc.flank - roff + 10;
+            }
+        }
+        if (span > (long long)(5.0 * region_len) + 2000) continue;
+        if (a < 0) a = 0;
+        if (b > n) b = n;
         if (b - a < span + 2 * (long long)loc.flank - 40) continue;
         if (b - a < 100) continue;
 
-        if (stored_bases + (size_t)(b - a) > cap_bases) {
+        const size_t len = (size_t)(b - a);
+        if (cap_bases != std::numeric_limits<size_t>::max()) {
+            size_t cur = soft_bases->load(std::memory_order_relaxed);
+            if (cur + len > cap_bases) {
+                soft_capped->store(true, std::memory_order_relaxed);
+                return;
+            }
+            soft_bases->fetch_add(len, std::memory_order_relaxed);
+        }
+        out.push_back(CutRecord{key, lid, (uint8_t)strand,
+                                rd.substr(a, len), span});
+    }
+}
+
+/** One batch of reads handed from a producer to a worker. */
+struct ReadBatch {
+    std::vector<std::string> reads;
+    std::vector<uint64_t> keys;
+    size_t bases = 0;
+};
+
+struct BatchQueue {
+    std::deque<ReadBatch> q;
+    std::mutex mtx;
+    std::condition_variable not_empty, not_full;
+    std::vector<CutRecord> results;
+    std::mutex results_mtx;
+    std::atomic<long long> reads{0};
+    std::atomic<long long> bases{0};
+    std::atomic<size_t> soft_bases{0};
+    std::atomic<bool> soft_capped{false};
+    std::atomic<int> next_file{0};
+    int producers_left = 0;
+    bool done = false;
+    size_t max_batches = 16;
+    std::mutex log_mtx;
+};
+
+struct PipelineCfg {
+    const std::vector<Locus> *loci;
+    const SeedIndex *idx;
+    size_t cap_bases;
+    size_t batch_reads;
+    size_t batch_bases;
+};
+
+void push_batch(BatchQueue &bq, ReadBatch &batch)
+{
+    if (batch.reads.empty()) return;
+    std::unique_lock<std::mutex> lk(bq.mtx);
+    bq.not_full.wait(lk, [&] { return bq.q.size() < bq.max_batches; });
+    bq.q.push_back(std::move(batch));
+    batch = ReadBatch();
+    bq.not_empty.notify_one();
+}
+
+void producer(const hifiasm_opt_t *opt, BatchQueue &bq, const PipelineCfg &cfg)
+{
+    for (;;) {
+        if (bq.soft_capped.load(std::memory_order_relaxed)) break;
+        int f = bq.next_file.fetch_add(1);
+        if (f >= opt->num_reads) break;
+
+        gzFile fp = gzopen(opt->read_file_names[f], "r");
+        if (!fp) {
+            fprintf(stderr, "[M::poa_polish] warning: cannot open %s\n",
+                    opt->read_file_names[f]);
+            continue;
+        }
+        gzbuffer(fp, 1 << 20);
+        kseq_t *ks = kseq_init(fp);
+        ReadBatch batch;
+        uint64_t read_idx = 0;
+        int l;
+        while ((l = kseq_read(ks)) >= 0) {
+            if (bq.soft_capped.load(std::memory_order_relaxed)) break;
+            batch.keys.push_back(((uint64_t)f << 40) | read_idx++);
+            batch.reads.emplace_back(ks->seq.s, ks->seq.l);
+            batch.bases += (size_t)l;
+            long long nr = bq.reads.fetch_add(1) + 1;
+            bq.bases.fetch_add(l);
+            if (nr % 1000000 == 0) {
+                std::lock_guard<std::mutex> lk(bq.log_mtx);
+                fprintf(stderr,
+                        "[M::poa_polish] streamed %lld reads (%.2f Gbp), kept %.2f Mbp\n",
+                        nr, bq.bases.load() / 1e9, bq.soft_bases.load() / 1e6);
+            }
+            if (batch.reads.size() >= cfg.batch_reads ||
+                batch.bases >= cfg.batch_bases)
+                push_batch(bq, batch);
+        }
+        kseq_destroy(ks);
+        gzclose(fp);
+        push_batch(bq, batch);
+    }
+
+    std::unique_lock<std::mutex> lk(bq.mtx);
+    if (--bq.producers_left == 0) {
+        bq.done = true;
+        bq.not_empty.notify_all();
+    }
+}
+
+void worker(BatchQueue &bq, const PipelineCfg &cfg)
+{
+    RecruitCtx ctx;
+    std::vector<CutRecord> local;
+    for (;;) {
+        ReadBatch batch;
+        {
+            std::unique_lock<std::mutex> lk(bq.mtx);
+            bq.not_empty.wait(lk, [&] { return !bq.q.empty() || bq.done; });
+            if (bq.q.empty() && bq.done) break;
+            batch = std::move(bq.q.front());
+            bq.q.pop_front();
+            bq.not_full.notify_one();
+        }
+        for (size_t i = 0; i < batch.reads.size(); ++i)
+            recruit_read(batch.reads[i], batch.keys[i], *cfg.loci, *cfg.idx, ctx,
+                         local, cfg.cap_bases, &bq.soft_bases, &bq.soft_capped);
+        if (!local.empty()) {
+            std::lock_guard<std::mutex> lk(bq.results_mtx);
+            for (CutRecord &r : local) bq.results.push_back(std::move(r));
+            local.clear();
+        }
+    }
+}
+
+/** Merge per-worker records in read order so results match a serial pass. */
+void merge_records(std::vector<CutRecord> &recs, std::vector<Locus> &loci,
+                   size_t cap_bases, RecruitStats &st)
+{
+    std::sort(recs.begin(), recs.end(), [](const CutRecord &a, const CutRecord &b) {
+        if (a.key != b.key) return a.key < b.key;
+        if (a.locus != b.locus) return a.locus < b.locus;
+        return a.strand < b.strand;
+    });
+    std::vector<uint32_t> counts(loci.size(), 0);
+    size_t total = 0;
+    for (CutRecord &r : recs) {
+        if (counts[r.locus] >= (uint32_t)MAX_READS_PER_LOCUS) continue;
+        if (cap_bases != std::numeric_limits<size_t>::max() &&
+            total + r.seq.size() > cap_bases) {
             st.capped = true;
-            return;
+            break;
         }
-        if (strand == 0) {
-            loci[lid].cut_reads.push_back(read.substr(a, b - a));
-        } else {
-            scratch = revcomp(read);
-            loci[lid].cut_reads.push_back(scratch.substr(a, b - a));
-        }
-        loci[lid].spans.push_back(span);
-        stored_bases += (size_t)(b - a);
+        total += r.seq.size();
+        ++counts[r.locus];
+        st.stored_bases += (long long)r.seq.size();
         ++st.stored_reads;
-        st.stored_bases += (b - a);
+        loci[r.locus].cut_reads.push_back(std::move(r.seq));
+        loci[r.locus].spans.push_back(r.span);
     }
 }
 
@@ -523,39 +714,39 @@ RecruitStats stream_recruit(const hifiasm_opt_t *opt, std::vector<Locus> &loci,
     if (opt->poa_max_cand_bases > 0)
         cap_bases = (size_t)opt->poa_max_cand_bases;
 
-    std::string read, scratch;
-    std::vector<FoundHit> found;
-    size_t stored_bases = 0;
-    long long next_report = 1000000;
+    int nthreads = opt->thread_num > 0 ? opt->thread_num : 1;
+    if (nthreads > 64) nthreads = 64;
 
-    for (int f = 0; f < opt->num_reads && !st.capped; ++f) {
-        gzFile fp = gzopen(opt->read_file_names[f], "r");
-        if (!fp) {
-            fprintf(stderr, "[M::poa_polish] warning: cannot open %s\n",
-                    opt->read_file_names[f]);
-            continue;
-        }
-        kseq_t *ks = kseq_init(fp);
-        int l;
-        while ((l = kseq_read(ks)) >= 0) {
-            ++st.reads;
-            st.bases += l;
-            if (st.capped) break;
-            read.assign(ks->seq.s, ks->seq.l);
-            recruit_read(read, loci, idx, found, cap_bases, st,
-                         stored_bases, scratch);
-            if (st.reads >= next_report) {
-                fprintf(stderr,
-                        "[M::poa_polish] streamed %lld reads (%.2f Gbp), kept %lld "
-                        "spanning reads (%.2f Mbp)\n",
-                        st.reads, st.bases / 1e9, st.stored_reads,
-                        st.stored_bases / 1e6);
-                next_report += 1000000;
-            }
-        }
-        kseq_destroy(ks);
-        gzclose(fp);
-    }
+    PipelineCfg cfg;
+    cfg.loci = &loci;
+    cfg.idx = &idx;
+    cfg.cap_bases = cap_bases;
+    cfg.batch_reads = 256;
+    cfg.batch_bases = 2 * 1024 * 1024;
+
+    BatchQueue bq;
+    bq.max_batches = (size_t)std::max(8, 4 * nthreads);
+    int nprod = std::min(opt->num_reads, 4);
+    if (nprod < 1) nprod = 1;
+    bq.producers_left = nprod;
+
+    std::vector<std::thread> workers;
+    workers.reserve(nthreads);
+    for (int t = 0; t < nthreads; ++t) workers.emplace_back(worker, std::ref(bq), std::cref(cfg));
+
+    std::vector<std::thread> prods;
+    prods.reserve(nprod);
+    for (int t = 0; t < nprod; ++t)
+        prods.emplace_back(producer, opt, std::ref(bq), std::cref(cfg));
+
+    for (std::thread &th : prods) th.join();
+    for (std::thread &th : workers) th.join();
+
+    st.reads = bq.reads.load();
+    st.bases = bq.bases.load();
+    merge_records(bq.results, loci, cap_bases, st);
+    st.capped = st.capped || bq.soft_capped.load();
+
     if (st.capped) {
         fprintf(stderr,
                 "[M::poa_polish] candidate read cap reached (%.2f Gbp); "
@@ -601,24 +792,45 @@ double containment(const std::string &seq, const std::unordered_set<uint64_t> &k
 /* one locus                                                                  */
 /* ------------------------------------------------------------------------- */
 
+struct PatchResult {
+    bool patch = false;
+    double seconds = 0.0;
+    std::string repeat;
+    LocusStat stat;
+};
+
 /**
  * Try to polish one repeat using the reads already recruited for it.
- * Returns true when `seq` was modified.
+ * Pure with respect to `seq`: returns the replacement repeat and a status, so
+ * many loci can be computed in parallel and spliced afterwards.
  */
-bool polish_locus(std::string &seq,
-                  const TrRegion &tr,
-                  const Locus &loc,
-                  const hifiasm_opt_t *opt,
-                  LocusStat &stat)
+PatchResult compute_locus(const std::string &seq,
+                          const TrRegion &tr,
+                          const Locus &loc,
+                          const hifiasm_opt_t *opt)
 {
+    PatchResult out;
+    LocusStat &stat = out.stat;
+    stat.contig = loc.contig;
+    stat.start = tr.start;
+    stat.end = tr.end;
+    stat.period = tr.period;
+    stat.old_len = stat.new_len = tr.end - tr.start;
+    stat.cont_old = stat.cont_new = -1.0;
     const int flank = loc.flank;
     const long long region_len = tr.end - tr.start;
     stat.n_reads = (int)loc.cut_reads.size();
 
+    if (opt->poa_max_locus_len > 0 && region_len > opt->poa_max_locus_len) {
+        stat.status = "skip:array_too_long";
+        return out;
+    }
+
+    stat.span_med = region_len;
     const int min_reads = std::max(3, opt->poa_min_reads);
     if ((int)loc.cut_reads.size() < min_reads) {
         stat.status = "skip:insufficient_reads";
-        return false;
+        return out;
     }
 
     /* Median read-array length + tolerance, used to avoid chasing consensus
@@ -628,12 +840,24 @@ bool polish_locus(std::string &seq,
         std::vector<long long> sorted = loc.spans;
         std::sort(sorted.begin(), sorted.end());
         span_med = sorted[sorted.size() / 2];
+        stat.span_min = sorted.front();
+        stat.span_max = sorted.back();
         std::vector<long long> dev;
         dev.reserve(sorted.size());
         for (long long x : sorted) dev.push_back(std::llabs(x - span_med));
         std::sort(dev.begin(), dev.end());
         long long mad = dev[dev.size() / 2];
         span_tol = std::max<long long>(40, std::max(3 * mad, (long long)(0.02 * span_med)));
+    }
+
+    /* The splice guard below refuses to touch a locus whose length already
+     * agrees with the spanning reads. Check that *before* running POA: on a
+     * correct assembly this skips essentially every locus, and POA on long
+     * tandem arrays is the expensive part. */
+    stat.span_med = span_med;
+    if (std::llabs(region_len - span_med) <= span_tol) {
+        stat.status = "unchanged_read_length";
+        return out;
     }
 
     std::unordered_set<uint64_t> read_kmers;
@@ -644,13 +868,27 @@ bool polish_locus(std::string &seq,
     const std::string old_repeat = seq.substr(tr.start, region_len);
     stat.cont_old = containment(old_repeat, read_kmers, HIT_KMER);
 
+    /* Bound the DP work for very long arrays: pass at most ~50 kb of reads
+     * per locus (evenly sampled), with at least --poa-min-reads. */
+    const size_t POA_BUDGET = 65536;
+    size_t n_rec = loc.cut_reads.size();
+    long long total_bases = 0;
+    for (const std::string &r : loc.cut_reads) total_bases += (long long)r.size();
+    size_t n_use = n_rec;
+    if (total_bases > (long long)POA_BUDGET) {
+        n_use = (size_t)((double)n_rec * (double)POA_BUDGET / (double)total_bases);
+        if (n_use < (size_t)min_reads) n_use = (size_t)min_reads;
+        if (n_use > n_rec) n_use = n_rec;
+    }
     std::vector<const char *> ptrs;
     std::vector<size_t> lens;
-    ptrs.reserve(loc.cut_reads.size());
-    lens.reserve(loc.cut_reads.size());
-    for (const std::string &r : loc.cut_reads) {
-        ptrs.push_back(r.data());
-        lens.push_back(r.size());
+    ptrs.reserve(n_use);
+    lens.reserve(n_use);
+    for (size_t j = 0; j < n_use; ++j) {
+        size_t idx = (size_t)((double)j * (double)n_rec / (double)n_use);
+        if (idx >= n_rec) idx = n_rec - 1;
+        ptrs.push_back(loc.cut_reads[idx].data());
+        lens.push_back(loc.cut_reads[idx].size());
     }
 
     const char *dbg_dir = getenv("POA_POLISH_DEBUG_DIR");
@@ -679,7 +917,7 @@ bool polish_locus(std::string &seq,
         stat.status = (res && res->error) ? (std::string("skip:") + res->error)
                                           : std::string("skip:poa_error");
         if (res) poa_result_free(res);
-        return false;
+        return out;
     }
 
     const std::string new_repeat(res->repeat, res->repeat_len);
@@ -717,40 +955,41 @@ bool polish_locus(std::string &seq,
 
     if (!anchored) {
         stat.status = "skip:flank_not_anchored";
-        return false;
+        return out;
     }
 
     double ratio = region_len > 0 ? (double)new_repeat.size() / (double)region_len : 0.0;
     if (new_repeat.empty() || ratio < 0.4 || ratio > 2.5) {
         stat.status = "skip:length_outlier";
-        return false;
+        return out;
     }
 
     stat.cont_new = containment(new_repeat, read_kmers, HIT_KMER);
     if (stat.cont_new >= 0 && stat.cont_old >= 0 && stat.cont_new + 0.05 < stat.cont_old) {
         stat.status = "skip:lower_support";
-        return false;
+        return out;
     }
 
     const long long delta = (long long)new_repeat.size() - region_len;
     if (new_repeat == old_repeat ||
         (std::llabs(delta) <= 2 && stat.cont_new <= stat.cont_old + 0.005)) {
         stat.status = "unchanged";
-        return false;
+        return out;
     }
 
     long long old_err = std::llabs(region_len - span_med);
     long long new_err = std::llabs((long long)new_repeat.size() - span_med);
     if (old_err <= span_tol || new_err >= old_err) {
         stat.status = "unchanged_read_length";
-        return false;
+        return out;
     }
 
-    seq = seq.substr(0, tr.start) + new_repeat + seq.substr(tr.end);
+    out.patch = true;
+    out.repeat = new_repeat;
     stat.old_len = region_len;
     stat.new_len = (long long)new_repeat.size();
     stat.status = "patched";
-    return true;
+    return out;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -803,6 +1042,8 @@ std::vector<Locus> collect_loci(const std::string &gfa_name, const hifiasm_opt_t
 
         std::vector<TrRegion> trs = detect_trs(seq, opt->poa_max_period);
         for (const TrRegion &tr : trs) {
+            if (opt->poa_max_locus_len > 0 &&
+                tr.end - tr.start > opt->poa_max_locus_len) continue;
             int flank = locus_flank((long long)seq.size(), tr, opt);
             if (flank < 40) continue;
             Locus loc;
@@ -833,29 +1074,38 @@ bool polish_one_gfa(const std::string &gfa_name,
                     int &n_patched,
                     long long &bases_added)
 {
+    const double t_start = now_s();
+
     /* ---- pass 1: find loci and their flanks ---------------------------- */
     std::vector<Locus> loci = collect_loci(gfa_name, opt);
+    const double t_detect = now_s();
     if (loci.empty()) {
         fprintf(stderr, "[M::poa_polish] %s: no tandem repeats found\n", gfa_name.c_str());
     }
 
     /* ---- one streaming pass over the reads ------------------------------ */
     RecruitStats st{0, 0, 0, 0, false};
+    double t_index_done = t_detect, t_stream = t_detect;
     if (!loci.empty()) {
         SeedIndex idx;
         build_index(loci, idx);
+        t_index_done = now_s();
         fprintf(stderr,
                 "[M::poa_polish] %s: %zu loci indexed (%zu seed k-mers); "
                 "streaming reads...\n",
                 gfa_name.c_str(), loci.size(), idx.head.size());
         st = stream_recruit(opt, loci, idx);
+        t_stream = now_s();
         size_t kept = 0;
         for (const Locus &l : loci) kept += l.cut_reads.size();
+        double dt = t_stream - t_index_done;
         fprintf(stderr,
                 "[M::poa_polish] %s: streamed %lld reads (%.2f Gbp), kept %zu reads "
-                "spanning %zu loci (%.2f Mbp)\n",
+                "spanning %zu loci (%.2f Mbp); detect %.2fs, index %.2fs, stream %.2fs "
+                "(%.1f Mbp/s)\n",
                 gfa_name.c_str(), st.reads, st.bases / 1e9, kept, loci.size(),
-                st.stored_bases / 1e6);
+                st.stored_bases / 1e6, t_detect - t_start, t_index_done - t_detect,
+                dt, dt > 0.001 ? st.bases / 1e6 / dt : 0.0);
     }
 
     /* ---- pass 2: patch and write --------------------------------------- */
@@ -882,6 +1132,7 @@ bool polish_one_gfa(const std::string &gfa_name,
     std::vector<std::string> tk;
     size_t next_locus = 0;
     int n_seg = 0, n_seg_patched = 0;
+    double t_poa = 0.0;
     bool have_seg = false;
     std::vector<TrRegion> cur_trs;
     std::vector<int> cur_ids;
@@ -892,31 +1143,63 @@ bool polish_one_gfa(const std::string &gfa_name,
         bool patched = false;
         std::vector<std::pair<long long, long long>> shifts; // (region end, delta)
 
-        /* right-to-left keeps earlier coordinates valid */
-        for (int k = (int)cur_trs.size() - 1; k >= 0; --k) {
-            if (cur_ids[k] < 0) continue;
-            const Locus &loc = loci[cur_ids[k]];
-            LocusStat stt;
-            stt.contig = name;
-            stt.start = cur_trs[k].start;
-            stt.end = cur_trs[k].end;
-            stt.period = cur_trs[k].period;
-            stt.old_len = stt.new_len = cur_trs[k].end - cur_trs[k].start;
-            stt.n_reads = 0;
-            stt.cont_old = stt.cont_new = -1.0;
+        /* POA calls are independent per locus: run them in parallel, then
+         * splice right-to-left so earlier coordinates stay valid. */
+        const int L = (int)cur_trs.size();
+        std::vector<PatchResult> results(L);
+        std::vector<char> computed(L, 0);
+        int nthreads = opt->thread_num > 0 ? opt->thread_num : 1;
+        if (nthreads > 64) nthreads = 64;
+        const double p0 = now_s();
+        if (nthreads > 1 && L > 1) {
+            std::atomic<size_t> next{0};
+            auto worker = [&]() {
+                for (;;) {
+                    size_t k = next.fetch_add(1);
+                    if (k >= (size_t)L) break;
+                    if (cur_ids[k] < 0) continue;
+                    const double q0 = now_s();
+                    results[k] = compute_locus(seq, cur_trs[k], loci[cur_ids[k]], opt);
+                    results[k].seconds = now_s() - q0;
+                    computed[k] = 1;
+                }
+            };
+            std::vector<std::thread> pool;
+            pool.reserve(nthreads - 1);
+            for (int t = 1; t < nthreads; ++t) pool.emplace_back(worker);
+            worker();
+            for (std::thread &th : pool) th.join();
+        } else {
+            for (int k = 0; k < L; ++k) {
+                if (cur_ids[k] < 0) continue;
+                const double q0 = now_s();
+                results[k] = compute_locus(seq, cur_trs[k], loci[cur_ids[k]], opt);
+                results[k].seconds = now_s() - q0;
+                computed[k] = 1;
+            }
+        }
+        t_poa += now_s() - p0;
+
+        for (int k = L - 1; k >= 0; --k) {
+            if (!computed[k]) continue;
+            LocusStat &stt = results[k].stat;
             ++n_loci;
-            if (polish_locus(seq, cur_trs[k], loc, opt, stt)) {
+            if (results[k].patch) {
                 patched = true;
                 ++n_patched;
                 bases_added += stt.new_len - stt.old_len;
                 shifts.push_back({cur_trs[k].end, stt.new_len - stt.old_len});
+                seq = seq.substr(0, cur_trs[k].start) + results[k].repeat +
+                      seq.substr(cur_trs[k].end);
             }
             fprintf(stderr,
                     "[M::poa_polish] %s %lld-%lld period=%d copies=%.1f reads=%d "
-                    "support=%.3f->%.3f %s\n",
+                    "support=%.3f->%.3f med=%lld [%lld..%lld] %s (%.2fs)\n",
                     stt.contig.c_str(), stt.start, stt.end, stt.period,
                     (double)(cur_trs[k].end - cur_trs[k].start) / cur_trs[k].period,
-                    stt.n_reads, stt.cont_old, stt.cont_new, stt.status.c_str());
+                    stt.n_reads, stt.cont_old, stt.cont_new, stt.span_med,
+                    stt.span_min, stt.span_max, stt.status.c_str(),
+                    results[k].seconds);
             if (tsv)
                 fprintf(tsv,
                         "%s\t%s\t%lld\t%lld\t%d\t%.2f\t%lld\t%lld\t%d\t%.4f\t%.4f\t%s\n",
@@ -1003,6 +1286,16 @@ bool polish_one_gfa(const std::string &gfa_name,
             if (seq != "*") {
                 cur_trs = detect_trs(seq, opt->poa_max_period);
                 for (const TrRegion &tr : cur_trs) {
+                    if (opt->poa_max_locus_len > 0 &&
+                        tr.end - tr.start > opt->poa_max_locus_len) {
+                        fprintf(stderr,
+                                "[M::poa_polish] %s %lld-%lld array is %lld bp "
+                                "(> --poa-max-locus-len %d); skipped\n",
+                                name.c_str(), tr.start, tr.end,
+                                tr.end - tr.start, opt->poa_max_locus_len);
+                        cur_ids.push_back(-1);
+                        continue;
+                    }
                     int flank = locus_flank((long long)seq.size(), tr, opt);
                     if (flank < 40) { cur_ids.push_back(-1); continue; }
                     if (next_locus >= loci.size()) {
@@ -1045,8 +1338,12 @@ bool polish_one_gfa(const std::string &gfa_name,
     fclose(out);
     fclose(fa);
 
-    fprintf(stderr, "[M::poa_polish] %s: %d contig(s), %d polished\n",
-            gfa_name.c_str(), n_seg, n_seg_patched);
+    const double t_end = now_s();
+    fprintf(stderr, "[M::poa_polish] %s: %d contig(s), %d polished; timing: "
+            "detect %.2fs, index %.2fs, stream %.2fs, patch %.2fs (poa %.2fs), total %.2fs\n",
+            gfa_name.c_str(), n_seg, n_seg_patched, t_detect - t_start,
+            t_index_done - t_detect, t_stream - t_index_done, t_end - t_stream,
+            t_poa, t_end - t_start);
     return true;
 }
 

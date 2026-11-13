@@ -1,7 +1,7 @@
 #gfa	contig	start	end	period	copies	old_len	new_len	reads	support_old	support_new	status
 degraded.p_ctg.gfa	ptg000001l	339176	339995	21	39.00	819	882	12	1.0000	1.0000	patched
-degraded.p_ctg.gfa	ptg000001l	273647	275051	38	36.95	1404	1518	23	1.0000	1.0000	patched
-degraded.p_ctg.gfa	ptg000001l	197672	205167	51	146.96	7495	8158	8	1.0000	0.9900	patched
-degraded.p_ctg.gfa	ptg000001l	130003	130831	3	276.00	828	900	27	1.0000	1.0000	patched
-degraded.p_ctg.gfa	ptg000001l	66380	70903	29	155.97	4523	4927	10	1.0000	1.0000	patched
-degraded.p_ctg.gfa	ptg000001l	7995	11310	3	1105.00	3315	3601	12	1.0000	1.0000	patched
+degraded.p_ctg.gfa	ptg000001l	273647	275051	38	36.95	1404	1518	21	1.0000	1.0000	patched
+degraded.p_ctg.gfa	ptg000001l	197672	205167	51	146.96	7495	8153	7	1.0000	0.9945	patched
+degraded.p_ctg.gfa	ptg000001l	130003	130831	3	276.00	828	900	25	1.0000	1.0000	patched
+degraded.p_ctg.gfa	ptg000001l	66380	70903	29	155.97	4523	4925	7	1.0000	0.9895	patched
+degraded.p_ctg.gfa	ptg000001l	7995	11310	3	1105.00	3315	3603	10	1.0000	1.0000	patched

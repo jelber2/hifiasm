@@ -88,6 +88,7 @@ static ko_longopt_t long_options[] = {
     { "poa-max-candidate-bases", ko_required_argument, 370},
     { "poa-seed-step", ko_required_argument, 371},
     { "poa-edge-len", ko_required_argument, 372},
+    { "poa-max-locus-len", ko_required_argument, 373},
     // { "path-round",     ko_required_argument, 348},
 	{ 0, 0, 0 }
 };
@@ -248,6 +249,9 @@ void Print_H(hifiasm_opt_t* asm_opt)
     fprintf(stderr, "    --poa-edge-len   INT\n");
     fprintf(stderr, "                      flank edge length used for seeding, 20-120 [%d]\n",
                                       asm_opt->poa_edge_len);
+    fprintf(stderr, "    --poa-max-locus-len INT\n");
+    fprintf(stderr, "                      skip arrays longer than this (0 = no limit) [%d]\n",
+                                      asm_opt->poa_max_locus_len);
 
     fprintf(stderr, "  ONT simplex assembly (beta):\n");
     fprintf(stderr, "    --ont        assemble ONT simplex reads in fastq format\n");
@@ -399,6 +403,7 @@ void init_opt(hifiasm_opt_t* asm_opt)
     asm_opt->poa_max_cand_bases = 4000000000LL;
     asm_opt->poa_seed_step = 2;
     asm_opt->poa_edge_len = 60;
+    asm_opt->poa_max_locus_len = 100000;
     asm_opt->is_sc = 0;
     asm_opt->chemical_cov = 1;
     asm_opt->chemical_flank = 256;
@@ -1050,6 +1055,8 @@ int CommandLine_process(int argc, char *argv[], hifiasm_opt_t* asm_opt)
             asm_opt->poa_seed_step = atol(opt.arg);
         } else if (c == 372) {
             asm_opt->poa_edge_len = atol(opt.arg);
+        } else if (c == 373) {
+            asm_opt->poa_max_locus_len = atol(opt.arg);
         } else if (c == 'l') {   ///0: disable purge_dup; 1: purge containment; 2: purge overlap
             asm_opt->purge_level_primary = asm_opt->purge_level_trio = atoi(opt.arg);
         }

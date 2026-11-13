@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "CommandLines.h"
@@ -49,6 +50,7 @@ static void print_help(FILE *fh)
 "Options:\n"
 "  -o, --output-prefix PREFIX    assembly prefix (alternative to the first\n"
 "                                positional argument)\n"
+"  -t, --threads INT             POA worker threads, 1-64 [all available CPUs]\n"
 "  -f, --flank INT               flank length used to anchor a repeat, >=40 [120]\n"
 "      --min-reads INT           minimum spanning reads to rewrite a locus\n"
 "                                (effective minimum 3) [6]\n"
@@ -59,6 +61,8 @@ static void print_help(FILE *fh)
 "                                reads, 1-64 [2]; 1 is most sensitive\n"
 "      --max-candidate-bases INT cap on recruited read bases held in memory;\n"
 "                                0 = unlimited [4000000000]\n"
+"      --max-locus-len INT       skip arrays longer than this many bp;\n"
+"                                0 = no limit [100000]\n"
 "  -h, --help                    show this help and exit\n"
 "  -V, --version                 show version information and exit\n"
 "\n"
@@ -128,7 +132,10 @@ int main(int argc, char **argv)
     opt.poa_max_cand_bases = 4000000000LL;
     opt.poa_seed_step = 2;
     opt.poa_edge_len = 60;
-    opt.thread_num = 1;
+    opt.poa_max_locus_len = 100000;
+    unsigned hw = std::thread::hardware_concurrency();
+    opt.thread_num = hw ? (int)hw : 1;
+    if (opt.thread_num > 64) opt.thread_num = 64;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -165,6 +172,18 @@ int main(int argc, char **argv)
                 prefix = take_value(name);
                 continue;
             }
+            if (!strcmp(name, "-t") || !strcmp(name, "--threads")) {
+                const char *tv = take_value(name);
+                long long v = 0;
+                if (!parse_int(tv, v) || v < 1 || v > 64) {
+                    fprintf(stderr,
+                            "%s: --threads must be an integer between 1 and 64 "
+                            "(got '%s')\n", kProg, tv);
+                    return 2;
+                }
+                opt.thread_num = (int)v;
+                continue;
+            }
 
             bool is_flank = !strcmp(name, "-f") || !strcmp(name, "--flank") ||
                             !strcmp(name, "--poa-flank");
@@ -178,9 +197,11 @@ int main(int argc, char **argv)
                            !strcmp(name, "--poa-seed-step");
             bool is_cand = !strcmp(name, "--max-candidate-bases") ||
                            !strcmp(name, "--poa-max-candidate-bases");
+            bool is_maxlocus = !strcmp(name, "--max-locus-len") ||
+                               !strcmp(name, "--poa-max-locus-len");
 
             if (!is_flank && !is_min_reads && !is_max_period && !is_edge &&
-                !is_step && !is_cand) {
+                !is_step && !is_cand && !is_maxlocus) {
                 fprintf(stderr, "%s: unknown option '%s'\n", kProg, name);
                 short_usage(stderr);
                 return 2;
@@ -216,11 +237,15 @@ int main(int argc, char **argv)
                     return usage_error("--seed-step must be between 1 and 64 "
                                        "(got %s)", val);
                 opt.poa_seed_step = (int)v;
-            } else {
+            } else if (is_cand) {
                 if (v < 0)
                     return usage_error("--max-candidate-bases must be >= 0 "
                                        "(got %s)", val);
                 opt.poa_max_cand_bases = v;
+            } else {
+                if (v < 0)
+                    return usage_error("--max-locus-len must be >= 0 (got %s)", val);
+                opt.poa_max_locus_len = (int)v;
             }
             continue;
         }

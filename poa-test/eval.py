@@ -376,9 +376,15 @@ def main():
                   f"{(al if al is not None else '-'):>6} {(dl if dl is not None else '-'):>6} "
                   f"{'-':>7s} {'-':>6s}  {r['status']}")
         else:
+            al = r.get("asm_len")
+            dl = r.get("len_delta")
+            ident = r.get("identity")
+            asm_s = f"{al:6d}" if al is not None else f"{'-':>6s}"
+            dl_s = f"{dl:+6d}" if dl is not None else f"{'-':>6s}"
+            id_s = f"{ident*100:6.2f}%" if ident is not None else f"{'-':>7s}"
             print(f"{r['name']:10s} {r['unit_len']:4d} {r['truth_len']:6d} "
-                  f"{r['asm_len']:6d} {r['len_delta']:+6d} {r['identity']*100:6.2f}% "
-                  f"{r['errors']:6d}  {r['status']}")
+                  f"{asm_s} {dl_s} {id_s} "
+                  f"{(r['errors'] if r.get('errors') is not None else '-')!s:>6s}  {r['status']}")
 
     result = {"loci": rows, "aligned_bases": tot_m, "aligned_errors": tot_e,
               "aligned_identity": (tot_m / (tot_m + tot_e)) if tot_m + tot_e else 0.0,

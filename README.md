@@ -147,10 +147,12 @@ hifiasm -t64 --ont --poa-polish -o ONT.asm ONT.read.fastq.gz
 # per-locus report: ONT.asm.poa.tsv
 ```
 
-The original GFA is left untouched. This needs a Rust toolchain (cargo/rustc
-1.85+) at build time; see `poa-test/README.md` for options, benchmarks and
-limitations (`--poa-flank`, `--poa-min-reads`, `--poa-max-period`,
-`--poa-max-candidate-bases`, `--poa-seed-step`, `--poa-edge-len`).
+The original GFA is left untouched. The pass uses the `-t` thread count for its
+producer/worker read stream and parallel POA calls, and skips loci whose length
+already matches the spanning reads. This needs a Rust toolchain (cargo/rustc 1.85+) at build time; see
+`poa-test/README.md` for options, benchmarks and limitations (`--poa-flank`,
+`--poa-min-reads`, `--poa-max-period`, `--poa-max-candidate-bases`,
+`--poa-seed-step`, `--poa-edge-len`, `--poa-max-locus-len`).
 
 
 ### <a name="hic"></a>Hi-C integration
