@@ -890,7 +890,6 @@ RecruitStats stream_recruit(const hifiasm_opt_t *opt, std::vector<Locus> &loci,
     }
 
     int nthreads = opt->thread_num > 0 ? opt->thread_num : 1;
-    if (nthreads > 64) nthreads = 64;
 
     int nprod = std::min(opt->num_reads, 4);
     if (nprod < 1) nprod = 1;
@@ -1419,7 +1418,6 @@ bool polish_one_gfa(const std::string &gfa_name,
         std::vector<PatchResult> results(L);
         std::vector<char> computed(L, 0);
         int nthreads = opt->thread_num > 0 ? opt->thread_num : 1;
-        if (nthreads > 64) nthreads = 64;
         const double p0 = now_s();
         if (nthreads > 1 && L > 1) {
             std::atomic<size_t> next{0};

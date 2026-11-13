@@ -8,6 +8,7 @@
  */
 
 #include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -50,7 +51,7 @@ static void print_help(FILE *fh)
 "Options:\n"
 "  -o, --output-prefix PREFIX    assembly prefix (alternative to the first\n"
 "                                positional argument)\n"
-"  -t, --threads INT             POA worker threads, 1-64 [all available CPUs]\n"
+"  -t, --threads INT             stream/POA worker threads [all available CPUs]\n"
 "  -f, --flank INT               flank length used to anchor a repeat, >=40 [120]\n"
 "      --min-reads INT           minimum spanning reads to rewrite a locus\n"
 "                                (effective minimum 3) [6]\n"
@@ -147,7 +148,6 @@ int main(int argc, char **argv)
     opt.poa_gzip_threads = 0;
     unsigned hw = std::thread::hardware_concurrency();
     opt.thread_num = hw ? (int)hw : 1;
-    if (opt.thread_num > 64) opt.thread_num = 64;
 
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
@@ -187,10 +187,10 @@ int main(int argc, char **argv)
             if (!strcmp(name, "-t") || !strcmp(name, "--threads")) {
                 const char *tv = take_value(name);
                 long long v = 0;
-                if (!parse_int(tv, v) || v < 1 || v > 64) {
+                if (!parse_int(tv, v) || v < 1 || v > INT_MAX) {
                     fprintf(stderr,
-                            "%s: --threads must be an integer between 1 and 64 "
-                            "(got '%s')\n", kProg, tv);
+                            "%s: --threads must be a positive integer (got '%s')\n",
+                            kProg, tv);
                     return 2;
                 }
                 opt.thread_num = (int)v;
