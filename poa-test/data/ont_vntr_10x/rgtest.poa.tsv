@@ -1,0 +1,10 @@
+#gfa	contig	start	end	period	copies	old_len	new_len	reads	support_old	support_new	status
+rgtest.bp.p_ctg.gfa	ptg000001l	9508	10406	3	299.33	898	898	8	-1.0000	-1.0000	unchanged_read_length
+rgtest.bp.p_ctg.gfa	ptg000002l	26484	31583	51	99.98	5099	5099	2	-1.0000	-1.0000	skip:insufficient_reads
+rgtest.bp.p_ctg.gfa	ptg000003l	8742	9966	21	58.29	1224	1224	4	-1.0000	-1.0000	skip:insufficient_reads
+rgtest.bp.p_ctg.gfa	ptg000004l	20046	21283	76	16.28	1237	1237	2	-1.0000	-1.0000	skip:insufficient_reads
+rgtest.bp.hap1.p_ctg.gfa	h1tg000001l	9508	10406	3	299.33	898	898	8	-1.0000	-1.0000	unchanged_read_length
+rgtest.bp.hap1.p_ctg.gfa	h1tg000002l	26484	31583	51	99.98	5099	5099	2	-1.0000	-1.0000	skip:insufficient_reads
+rgtest.bp.hap1.p_ctg.gfa	h1tg000003l	8742	9966	21	58.29	1224	1224	4	-1.0000	-1.0000	skip:insufficient_reads
+rgtest.bp.hap1.p_ctg.gfa	h1tg000004l	20046	21283	76	16.28	1237	1237	2	-1.0000	-1.0000	skip:insufficient_reads
+rgtest.bp.hap2.p_ctg.gfa	h2tg000001l	8742	9966	21	58.29	1224	1224	4	-1.0000	-1.0000	skip:insufficient_reads

@@ -63,6 +63,10 @@ static void print_help(FILE *fh)
 "                                0 = unlimited [4000000000]\n"
 "      --max-locus-len INT       skip arrays longer than this many bp;\n"
 "                                0 = no limit [100000]\n"
+"      --decompressor STR        read stream backend: auto, zlib or rapidgzip\n"
+"                                [auto; rapidgzip if found in PATH]\n"
+"      --gzip-threads INT        rapidgzip threads per input file; 0 = auto\n"
+"                                [auto: (threads / 2) / files]\n"
 "  -h, --help                    show this help and exit\n"
 "  -V, --version                 show version information and exit\n"
 "\n"
@@ -133,6 +137,8 @@ int main(int argc, char **argv)
     opt.poa_seed_step = 2;
     opt.poa_edge_len = 60;
     opt.poa_max_locus_len = 100000;
+    opt.poa_decompressor = 0;
+    opt.poa_gzip_threads = 0;
     unsigned hw = std::thread::hardware_concurrency();
     opt.thread_num = hw ? (int)hw : 1;
     if (opt.thread_num > 64) opt.thread_num = 64;
@@ -199,15 +205,33 @@ int main(int argc, char **argv)
                            !strcmp(name, "--poa-max-candidate-bases");
             bool is_maxlocus = !strcmp(name, "--max-locus-len") ||
                                !strcmp(name, "--poa-max-locus-len");
+            bool is_decomp = !strcmp(name, "--decompressor") ||
+                             !strcmp(name, "--poa-decompressor");
+            bool is_gzthreads = !strcmp(name, "--gzip-threads") ||
+                                !strcmp(name, "--poa-gzip-threads");
 
             if (!is_flank && !is_min_reads && !is_max_period && !is_edge &&
-                !is_step && !is_cand && !is_maxlocus) {
+                !is_step && !is_cand && !is_maxlocus && !is_decomp &&
+                !is_gzthreads) {
                 fprintf(stderr, "%s: unknown option '%s'\n", kProg, name);
                 short_usage(stderr);
                 return 2;
             }
 
             val = take_value(name);
+
+            if (is_decomp) {
+                if (!strcmp(val, "auto")) opt.poa_decompressor = 0;
+                else if (!strcmp(val, "zlib")) opt.poa_decompressor = 1;
+                else if (!strcmp(val, "rapidgzip")) opt.poa_decompressor = 2;
+                else {
+                    fprintf(stderr, "%s: --decompressor must be auto, zlib or "
+                                    "rapidgzip (got '%s')\n", kProg, val);
+                    return 2;
+                }
+                continue;
+            }
+
             long long v = 0;
             if (!parse_int(val, v)) {
                 fprintf(stderr, "%s: option '%s' expects an integer, got '%s'\n",
@@ -242,10 +266,14 @@ int main(int argc, char **argv)
                     return usage_error("--max-candidate-bases must be >= 0 "
                                        "(got %s)", val);
                 opt.poa_max_cand_bases = v;
-            } else {
+            } else if (is_maxlocus) {
                 if (v < 0)
                     return usage_error("--max-locus-len must be >= 0 (got %s)", val);
                 opt.poa_max_locus_len = (int)v;
+            } else {
+                if (v < 0)
+                    return usage_error("--gzip-threads must be >= 0 (got %s)", val);
+                opt.poa_gzip_threads = (int)v;
             }
             continue;
         }

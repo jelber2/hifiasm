@@ -82,6 +82,8 @@ typedef struct {
     int poa_seed_step;
     int poa_edge_len;
     int poa_max_locus_len;
+    int poa_decompressor;
+    int poa_gzip_threads;
     int number_of_round;
     int number_of_pround;
     int adapterLen;

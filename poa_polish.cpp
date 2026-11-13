@@ -42,6 +42,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include <sys/wait.h>
+#include <unistd.h>
 #include <zlib.h>
 
 #include "kseq.h"
@@ -49,12 +51,29 @@
 #include "poa_polish.h"
 #include "poa-ffi/poa_ffi.h"
 
+/*
+ * One reader for plain files, gzip via zlib, and gzip via an external
+ * rapidgzip process (parallel decompression of a single gzip stream).
+ */
+struct InputStream {
+    int kind;      /* 0 = gzFile, 1 = FILE* (plain file or pipe) */
+    gzFile gz;
+    FILE *fp;
+    pid_t pid;
+};
+
+static int input_read(InputStream *in, unsigned char *buf, int len)
+{
+    if (in->kind == 0) return gzread(in->gz, buf, len);
+    return (int)fread(buf, 1, len, in->fp);
+}
+
 #define KSEQ_INIT_BUF(type_t, __read, __bufsize) \
     KSTREAM_INIT(type_t, __read, __bufsize) \
     __KSEQ_TYPE(type_t) \
     __KSEQ_BASIC(static klib_unused, type_t) \
     __KSEQ_READ(static klib_unused)
-KSEQ_INIT_BUF(gzFile, gzread, 1048576)
+KSEQ_INIT_BUF(InputStream*, input_read, 1048576)
 
 namespace {
 
@@ -589,13 +608,136 @@ struct BatchQueue {
     std::mutex log_mtx;
 };
 
+
+/* ------------------------------------------------------------------------- */
+/* input backends: plain file, zlib, rapidgzip pipe                          */
+/* ------------------------------------------------------------------------- */
+
+bool path_is_gzip(const char *path)
+{
+    size_t n = strlen(path);
+    if (n >= 3 && !strcmp(path + n - 3, ".gz")) return true;
+    if (n >= 4 && !strcmp(path + n - 4, ".bgz")) return true;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    unsigned char m[2] = {0, 0};
+    size_t got = fread(m, 1, 2, fp);
+    fclose(fp);
+    return got == 2 && m[0] == 0x1f && m[1] == 0x8b;
+}
+
+bool command_available(const char *name)
+{
+    const char *path = getenv("PATH");
+    if (!path || !*path) return false;
+    std::string all(path);
+    size_t pos = 0;
+    for (;;) {
+        size_t q = all.find(':', pos);
+        std::string dir = all.substr(pos, q == std::string::npos ? std::string::npos
+                                                                : q - pos);
+        if (dir.empty()) dir = ".";
+        std::string fn = dir + "/" + name;
+        if (access(fn.c_str(), X_OK) == 0) return true;
+        if (q == std::string::npos) break;
+        pos = q + 1;
+    }
+    return false;
+}
+
+/**
+ * Open a read file. `decompressor`: 0 = auto, 1 = zlib, 2 = rapidgzip.
+ * rapidgzip is spawned as `rapidgzip -d -c -P N <file>` and read through a
+ * pipe; its output is ordinary FASTQ, so the parser is unchanged.
+ */
+InputStream *open_input(const char *path, int decompressor, int gzip_threads)
+{
+    InputStream *in = new InputStream;
+    in->kind = 0;
+    in->gz = NULL;
+    in->fp = NULL;
+    in->pid = -1;
+
+    if (!path_is_gzip(path)) {
+        in->fp = fopen(path, "rb");
+        if (!in->fp) { delete in; return NULL; }
+        in->kind = 1;
+        return in;
+    }
+
+    bool want_rapidgzip = (decompressor == 2) ||
+                          (decompressor == 0 && command_available("rapidgzip"));
+    if (want_rapidgzip) {
+        int fds[2];
+        if (pipe(fds) == 0) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                close(fds[0]);
+                if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
+                close(fds[1]);
+                char pbuf[32];
+                snprintf(pbuf, sizeof(pbuf), "%d", gzip_threads > 0 ? gzip_threads : 0);
+                execlp("rapidgzip", "rapidgzip", "-d", "-c", "-P", pbuf, path,
+                       (char *)NULL);
+                _exit(127);
+            }
+            if (pid > 0) {
+                close(fds[1]);
+                FILE *fp = fdopen(fds[0], "r");
+                if (fp) {
+                    in->kind = 1;
+                    in->fp = fp;
+                    in->pid = pid;
+                    return in;
+                }
+                close(fds[0]);
+                int st = 0;
+                waitpid(pid, &st, 0);
+            } else {
+                close(fds[0]);
+                close(fds[1]);
+            }
+        }
+        if (decompressor == 2)
+            fprintf(stderr, "[M::poa_polish] warning: could not start rapidgzip; "
+                            "falling back to zlib\n");
+    }
+
+    in->gz = gzopen(path, "rb");
+    if (!in->gz) { delete in; return NULL; }
+    gzbuffer(in->gz, 1 << 20);
+    in->kind = 0;
+    return in;
+}
+
+void close_input(InputStream *in)
+{
+    if (!in) return;
+    if (in->kind == 0) {
+        if (in->gz) gzclose(in->gz);
+    } else {
+        if (in->fp) fclose(in->fp);
+        if (in->pid > 0) {
+            int st = 0;
+            waitpid(in->pid, &st, 0);
+            if (WIFEXITED(st) && WEXITSTATUS(st) != 0)
+                fprintf(stderr, "[M::poa_polish] warning: rapidgzip exited with status %d\n",
+                        WEXITSTATUS(st));
+        }
+    }
+    delete in;
+}
+
 struct PipelineCfg {
     const std::vector<Locus> *loci;
     const SeedIndex *idx;
     size_t cap_bases;
     size_t batch_reads;
     size_t batch_bases;
+    int decompressor;
+    int gzip_threads;
 };
+
 
 void push_batch(BatchQueue &bq, ReadBatch &batch)
 {
@@ -614,14 +756,14 @@ void producer(const hifiasm_opt_t *opt, BatchQueue &bq, const PipelineCfg &cfg)
         int f = bq.next_file.fetch_add(1);
         if (f >= opt->num_reads) break;
 
-        gzFile fp = gzopen(opt->read_file_names[f], "r");
-        if (!fp) {
+        InputStream *in = open_input(opt->read_file_names[f], cfg.decompressor,
+                                     cfg.gzip_threads);
+        if (!in) {
             fprintf(stderr, "[M::poa_polish] warning: cannot open %s\n",
                     opt->read_file_names[f]);
             continue;
         }
-        gzbuffer(fp, 1 << 20);
-        kseq_t *ks = kseq_init(fp);
+        kseq_t *ks = kseq_init(in);
         ReadBatch batch;
         uint64_t read_idx = 0;
         int l;
@@ -643,7 +785,7 @@ void producer(const hifiasm_opt_t *opt, BatchQueue &bq, const PipelineCfg &cfg)
                 push_batch(bq, batch);
         }
         kseq_destroy(ks);
-        gzclose(fp);
+        close_input(in);
         push_batch(bq, batch);
     }
 
@@ -717,17 +859,37 @@ RecruitStats stream_recruit(const hifiasm_opt_t *opt, std::vector<Locus> &loci,
     int nthreads = opt->thread_num > 0 ? opt->thread_num : 1;
     if (nthreads > 64) nthreads = 64;
 
+    int nprod = std::min(opt->num_reads, 4);
+    if (nprod < 1) nprod = 1;
+
+    bool have_rapidgzip = command_available("rapidgzip");
+    int decompressor = opt->poa_decompressor; /* 0 auto, 1 zlib, 2 rapidgzip */
+    if (decompressor == 2 && !have_rapidgzip) {
+        fprintf(stderr, "[M::poa_polish] warning: rapidgzip not found in PATH; "
+                        "using zlib\n");
+        decompressor = 1;
+    }
+    if (decompressor == 0) decompressor = have_rapidgzip ? 2 : 1;
+    int gzip_threads = opt->poa_gzip_threads > 0
+                           ? opt->poa_gzip_threads
+                           : std::max(1, nthreads / (2 * nprod));
+
     PipelineCfg cfg;
     cfg.loci = &loci;
     cfg.idx = &idx;
     cfg.cap_bases = cap_bases;
     cfg.batch_reads = 256;
     cfg.batch_bases = 2 * 1024 * 1024;
+    cfg.decompressor = decompressor;
+    cfg.gzip_threads = gzip_threads;
+
+    std::string dmsg = decompressor == 2
+        ? "rapidgzip (-P " + std::to_string(gzip_threads) + " per file; plain files bypass it)"
+        : "zlib (plain files bypass it)";
+    fprintf(stderr, "[M::poa_polish] decompressor: %s\n", dmsg.c_str());
 
     BatchQueue bq;
     bq.max_batches = (size_t)std::max(8, 4 * nthreads);
-    int nprod = std::min(opt->num_reads, 4);
-    if (nprod < 1) nprod = 1;
     bq.producers_left = nprod;
 
     std::vector<std::thread> workers;

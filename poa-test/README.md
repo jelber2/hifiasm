@@ -90,6 +90,11 @@ make poa-polish-gfa
 poa-test/polish_gfa --help          # includes -t/--threads
 ```
 
+Optional: install [rapidgzip](https://github.com/mxmlnkn/rapidgzip) so the
+`rapidgzip` binary is in `PATH` (`python3 -m pip install rapidgzip`) for
+parallel decompression of a single gzip read file. Without it the pass uses
+zlib.
+
 CI note: `.github/workflows/ci.yaml` must check out submodules
 (`submodules: recursive` in `actions/checkout`) or the Rust crate will be
 missing.
@@ -111,6 +116,8 @@ hifiasm --ont --poa-polish -t32 -o sample sample.fq.gz
 | `--poa-seed-step INT` | 2 | check every Nth read k-mer; 1 is most sensitive, 4–8 faster but may miss heavily errored flanks |
 | `--poa-edge-len INT` | 60 | bp at each flank end used for seeding/anchoring (20–120); larger is more sensitive and uses more index memory |
 | `--poa-max-locus-len INT` | 100000 | skip arrays longer than this (flanked POA is impractical there); `0` = no limit |
+| `--poa-decompressor STR` | auto | read stream backend: `auto`, `zlib` or `rapidgzip`; auto uses rapidgzip when it is in `PATH` |
+| `--poa-gzip-threads INT` | 0 (auto) | rapidgzip decoder threads per input file; auto = `(threads / 2) / files` |
 
 For example, maximum sensitivity on a 256 GiB machine:
 
@@ -127,6 +134,13 @@ reads and consensus per locus).
 
 ### Performance
 
+The gzip producer can use [rapidgzip](https://github.com/mxmlnkn/rapidgzip)
+for parallel decompression of a *single* standard gzip file (unlike pigz, which
+only parallelises streams it wrote itself). Install it with
+`python3 -m pip install rapidgzip` (or conda) so the `rapidgzip` binary is in
+`PATH`; the pass detects it automatically and otherwise falls back to zlib.
+`--poa-decompressor zlib` disables it.
+
 Read recruitment and POA are both parallel:
 
 * the read stream is a producer/worker pipeline: one or more producer threads
@@ -141,18 +155,21 @@ hifiasm passes its own `-t` value; `polish_gfa` defaults to all available CPUs
 
 * 11 Mbp/GFA: stream 0.08–0.10 s (~110–130 Mbp/s), patch ~0 s; previously
   ~0.16 s stream + ~6 s POA per GFA;
-* 89 Mbp/GFA (same reads ×8): stream 0.60 s with 8 workers versus 0.70 s with
-  one worker — one gzip producer is the floor at ~140–150 Mbp/s; with multiple
-  input files up to four producers run in parallel;
+* 89 Mbp/GFA (same reads ×8): zlib stream 0.57–0.64 s (~140–156 Mbp/s);
+  rapidgzip `-P 4` 0.23–0.28 s (~320–390 Mbp/s), `-P 8` 0.20 s
+  (~435 Mbp/s); uncompressed input 0.12 s (~750 Mbp/s). With multiple input
+  files up to four producers run in parallel;
 * controlled 8%-deletion repair (6 loci): ~3.4 s total, dominated by the 8.1 kb
   array (~3.2 s); the other five take 0.2–1.3 s each and run concurrently.
 
 ### Genome scale
 
-For 34× of a 3.2 Gbp genome there are ~108.8 Gbp of reads **per GFA**. At the
-measured ~140 Mbp/s that is ~13 min per GFA, ~40 min for primary+hap1+hap2;
-with a human-size seed index (GBs, cache-missing lookups) expect roughly
-15–25 min per GFA, 45–75 min for trio output. The index for ~1M detected arrays
+For 34× of a 3.2 Gbp genome there are ~108.8 Gbp of reads **per GFA**. With zlib
+at the measured ~140 Mbp/s that is ~13 min per GFA, ~40 min for
+primary+hap1+hap2. With rapidgzip (~320–435 Mbp/s on the test, and higher on
+larger files) decompression is no longer the limit; the scan/lookups take over,
+so expect roughly 5–12 min per GFA and 15–35 min for trio output on ~8 cores.
+Plain (uncompressed) FASTQ avoids the gzip stage entirely. The index for ~1M detected arrays
 costs ~15–20 GB. The candidate-read cap is the other memory knob: the default
 4 Gbp is too small at this scale (it will stop the stream early), so raise it,
 e.g.:
